@@ -2,5 +2,8 @@
 	path = uthash
 	url = git@github.com:troydhanson/uthash.git
 [submodule "libfabric-c"]
-	path = libfabric-c
+	path = libfabric-sys/libfabric-c
+	url = https://github.com/ofiwg/libfabric.git
+[submodule "libfabric-sys/libfabric"]
+	path = libfabric-sys/libfabric
 	url = https://github.com/ofiwg/libfabric.git
