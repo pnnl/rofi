@@ -1,0 +1,19 @@
+[package]
+name = "rofi-rust"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+pmi2-sys = {path = "../pmi2-sys/", optional = true, default-features = false}
+libfabric = {path = "../libfabric/", default-features = false}
+pmi-sys = {path = "../pmi-sys/", optional = true, default-features = false}
+page_size= "0.6.0" 
+memmap = "0.7.0"
+debug_print = "1.0.0"
+
+[features]
+default = ["with-pmi1"]
+with-pmi2 = ["dep:pmi2-sys"] 
+with-pmi1 = ["dep:pmi-sys"]
