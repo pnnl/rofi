@@ -1,14 +1,10 @@
-use libfabric;
 use std::cell::RefCell;
+use std::rc::Rc;
 
-// struct ContextElement {
-//     ctx: libfabric::Context,
-//     id: usize,
-// }
 
 pub(crate) struct ContextBank {
     curr_ctx_id: usize,
-    bank: std::collections::HashMap<usize, RefCell<libfabric::Context>>,
+    bank: std::collections::HashMap<usize, Rc<RefCell<libfabric::Context>>>,
 }
 
 impl ContextBank {
@@ -20,26 +16,16 @@ impl ContextBank {
         }
     }
 
-    pub(crate) fn create(&mut self) -> usize {
+    pub(crate) fn create(&mut self) -> Rc<RefCell<libfabric::Context>> {
 
 
-        let res = RefCell::new(libfabric::Context::new());
+        let res = Rc::new(RefCell::new(libfabric::Context::new()));
         
         self.bank.insert(self.curr_ctx_id, res);
-        let res = self.curr_ctx_id;
+        // let res = self.curr_ctx_id;
+        
         self.curr_ctx_id += 1;
-
-        res
+        self.bank.get(&(self.curr_ctx_id-1)).unwrap().clone()
     }
 
-    pub(crate) fn get(&self, id: usize) -> Option<&RefCell<libfabric::Context>> {
-        
-        self.bank.get(&id)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn rm(&mut self, id: usize) -> Option<RefCell<libfabric::Context>>{
-        
-        self.bank.remove(&id)
-    }
 }

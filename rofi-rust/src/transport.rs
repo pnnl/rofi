@@ -25,7 +25,7 @@ pub(crate) fn init_ep_resources(info: &libfabric::InfoEntry, domain: &libfabric:
         }.count(10);
 
     let av = domain.av_open(av_attr).unwrap();
-    let ep = domain.ep(&info).unwrap();
+    let ep = domain.ep(info).unwrap();
 
 
 
@@ -57,14 +57,14 @@ pub(crate) fn progress(cq: &libfabric::cq::CompletionQueue, _total: u64, cq_cntr
     }
 }
 
-pub(crate) fn wait_on_cntr(pending_cntr: &mut u64, cntr: &mut Counter) -> Result<(), libfabric::error::Error>{
+pub(crate) fn wait_on_cntr(pending_cntr: &mut u64, cntr: &Counter) -> Result<(), libfabric::error::Error>{
 
     let mut cnt = *pending_cntr;
     let mut prev_cnt;
 
     loop {
         prev_cnt = cnt;
-        cntr.wait(prev_cnt as u64, -1)?;
+        cntr.wait(prev_cnt, -1)?;
         cnt = *pending_cntr;
 
         if prev_cnt >= cnt {
@@ -73,6 +73,11 @@ pub(crate) fn wait_on_cntr(pending_cntr: &mut u64, cntr: &mut Counter) -> Result
     }
 
     Ok(())
+}
+
+pub(crate) fn check_cntr(pending_cntr: &u64, cntr: &Counter) -> bool {
+
+    cntr.read() <= *pending_cntr
 }
 
 pub(crate) fn wait_on_context_comp(ctx: &libfabric::Context, cq: &CompletionQueue, cq_cntr: &mut u64) {
@@ -108,12 +113,8 @@ pub(crate) fn wait_on_event(event: &libfabric::enums::Event, eq: &EventQueue, tx
         
         match ret {
             Ok((_, _ev)) => {
-                println!("Found something");
-                if matches!(event, _ev) {
-                    println!("Equal");
-                    if eq_entry.is_context_equal(ctx) {
-                        break;
-                    }
+                if matches!(event, _ev) && eq_entry.is_context_equal(ctx) {
+                    break;
                 }
             },
             Err(ref err) => {
@@ -210,14 +211,12 @@ pub fn info_to_mr_attr(info: &libfabric::InfoEntry) -> libfabric::mr::MemoryRegi
             }
         }
     }
-    else {
-        if info.get_caps().is_rma() || info.get_caps().is_atomic() {
-            if rma_read_target_allowed(info.get_caps()) {
-                mr_attr = mr_attr.access_remote_read();
-            }
-            if rma_write_target_allowed(info.get_caps()) {
-                mr_attr = mr_attr.access_remote_write();
-            }
+    else if info.get_caps().is_rma() || info.get_caps().is_atomic() {
+        if rma_read_target_allowed(info.get_caps()) {
+            mr_attr = mr_attr.access_remote_read();
+        }
+        if rma_write_target_allowed(info.get_caps()) {
+            mr_attr = mr_attr.access_remote_write();
         }
     }
 
@@ -228,12 +227,12 @@ macro_rules!  post{
     ($post_fn:ident, $prog_fn:expr, $cq:expr, $seq:expr, $cq_cntr:expr, $op_str:literal, $ep:expr, $( $x:expr),* ) => {
         loop {
             let ret = $ep.$post_fn($($x,)*);
-            if matches!(ret, Ok(_)) {
+            if ret.is_ok() {
                 break;
             }
             else if let Err(ref err) = ret {
                 if !matches!(err.kind, libfabric::error::ErrorKind::TryAgain) {
-                    ret.unwrap();
+                    panic!("Unexepcted error in post_rma ");
                 }
 
             }
