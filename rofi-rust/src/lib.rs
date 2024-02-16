@@ -8,7 +8,7 @@ use std::rc::Rc;
 use mr::{MappedMemoryRegion, MemoryRegionManager};
 use debug_print::debug_println;
 use context::ContextBank;
-use libfabric::{av::AddressVector, cntr::Counter, cq::CompletionQueue, domain::Domain, enums::MrMode, ep::{Endpoint, EndpointAttr}, eq::{EventQueue, EventQueueAttr}, error::Error, fabric::Fabric, mr::MemoryRegionDesc, Address, CollectiveAttr, Context, Info, InfoEntry, RmaIoVec, FID};
+use libfabric::{av::AddressVector, cntr::Counter, cq::CompletionQueue, domain::Domain, enums::MrMode, ep::{Endpoint, EndpointAttr}, eq::{EventQueue, EventQueueAttr}, error::Error, fabric::Fabric, mr::MemoryRegionDesc, Address, CollectiveAttr, Info, InfoEntry, RmaIoVec, FID};
 
 // Encapsulates data for the Tx/Rx operations
 struct XxData {
@@ -57,7 +57,15 @@ pub struct RofiBuilder {
 }
 
 impl RofiBuilder {
-
+    /// Request to build rofi using PMI1 if available
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let rofi = RofiBuilder::with_pmi1();
+    /// ```
     #[cfg(feature = "with-pmi1")]    
     pub fn with_pmi1() -> Self {
         Self {
@@ -65,6 +73,15 @@ impl RofiBuilder {
         }
     }
     
+    /// Request to build rofi using PMI2 if available
+    /// 
+    ///  # Examples
+    /// 
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    /// 
+    /// let rofi = RofiBuilder::with_pmi2();
+    /// ```
     #[cfg(feature = "with-pmi2")]    
     pub fn with_pmi2() -> Self {
         Self {
@@ -72,6 +89,20 @@ impl RofiBuilder {
         }
     }
 
+    /// Request to build rofi without any prefered PMI implementation.
+    /// 
+    /// Depending on the features enabled (i.e., "with-pmi1", "with-pmi2") rofi will
+    /// try to build with PMI2 first and will fallback to PMI1 if PMI2 is not enabled
+    /// 
+    /// 
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let rofi = RofiBuilder::new();
+    /// ```
     #[cfg(any(feature = "with-pmi1", feature = "with-pmi2"))]
     pub fn new() -> Self {
         #[cfg(not(feature = "with-pmi2"))]
@@ -85,6 +116,18 @@ impl RofiBuilder {
         }
     }
 
+    /// Instatiate a Rofi object
+    /// 
+    /// # Collective Operation
+    /// Requires all PEs in the job to enter the call
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let rofi_builder = RofiBuilder::with_pmi1.build()
+    /// ```
     pub fn build(self) -> Result<Rofi, libfabric::error::Error> {
         
         Rofi::init(self.pmi)
@@ -158,7 +201,7 @@ impl Rofi {
         let key = rofi.barrier_mr.get_key();
         let mr = rofi.barrier_mr.get_mem().borrow().as_ptr() as u64;
         
-        let remote_iovs = rofi.exchange_keys(mr, key);
+        let remote_iovs = rofi.exchange_mr_info(mr, key);
         rofi.barrier_mr.set_iovs(remote_iovs);
 
 
@@ -167,24 +210,71 @@ impl Rofi {
     }
 
     /// Returns the number of processes that take part into this job
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let rofi = RofiBuilder::new().build();
+    /// let num_pes = rofi.get_size();
+    /// ```
     pub fn get_size(&self) -> usize {
         self.world.nnodes
     }
 
     /// Returns the id of the current processes in this job
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let rofi = RofiBuilder::new().build();
+    /// let my_pe = rofi.get_id();
+    /// ```
     pub fn get_id(&self) -> usize {
         self.world.my_id
     }
 
+    /// Allocates a memory region of size `size` and registers it to be accessible remotely
+    /// from other compute nodes. 
+    /// 
+    /// # Collective Operation
+    /// Requires all PEs in the job to enter the call
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let rofi = RofiBuilder::new().build();
+    /// let mem = rofi.alloc(256);
+    /// ```
     pub fn alloc(&mut self, size: usize) ->  Rc<mr::MappedMemoryRegion> {
 
         let mem = self.mr_manager.borrow_mut().alloc(&self.info, &self.domain, &self.ep, size);
-        let remote_iovs = self.exchange_keys(mem.get_mem().borrow().as_ptr() as u64, mem.get_key());
+        let remote_iovs = self.exchange_mr_info(mem.get_mem().borrow().as_ptr() as u64, mem.get_key());
         mem.set_iovs(remote_iovs);
         
         mem.clone()
     }
     
+    /// Allocates a memory region of size `size` and registers it to be accessible remotely
+    /// from other compute nodes in the subset. The calling PE *must* be in the subset
+    /// 
+    /// # Collective Operations
+    /// Requires all PEs in the subset to enter the call  
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let mut rofi = RofiBuilder::new().build();
+    /// let pes: Vec<usize> = (0..3).collect();
+    /// let result = rofi.sub_alloc(256, &pes);
+    /// ```
     pub fn sub_alloc(&mut self, size: usize, pes: &[usize]) ->  Rc<mr::MappedMemoryRegion> {
         
         let mem = self.mr_manager.borrow_mut().alloc(&self.info, &self.domain, &self.ep, size);
@@ -194,41 +284,132 @@ impl Rofi {
         mem.clone()
     }
 
+    /// Initiate a transfer of data in `src` to the memory address `dst` at PE `id`and wait for its completion
+    /// Buffer `src` can be reused immediately once the call returns.
+    /// 
+    /// # Safety
+    /// This function is unsafe as the destination memory address might be mutated by other PEs at the same time
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let mut rofi = RofiBuilder::new().build();
+    /// let mem = rofi.alloc(256);
+    /// let src = [0_u8; 256];
+    /// 
+    /// unsafe { rofi.iput(&mem[128..].as_ptr() as usize, &src, 1).unwrap() };
+    /// ```
     pub unsafe fn iput(&mut self, dst: usize, src: &[u8], id: usize) -> Result<(), std::io::Error> {
 
         self.put_(dst, src, id, true)
     }
 
+    /// Initiate a transfer of data in `src` to the memory address `dst` at PE `id`and return immediately.
+    /// Call returns before the operation has been completed so users are expected to check for its completion
+    /// before modifying the data in `src`.
+    /// 
+    /// # Safety
+    /// This function is unsafe as the destination memory address might be mutated by other PEs at the same time 
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    /// 
+    /// let mut rofi = RofiBuilder::new().build();
+    /// let mem = rofi.alloc(256);
+    /// let src = [0_u8; 256];
+    /// 
+    /// unsafe { rofi.put(mem[0..256].as_ptr() as usize, &src, 1).unwrap() };
+    /// ```
     pub unsafe fn put(&mut self, dst: usize, src: &[u8], id: usize) -> Result<(), std::io::Error> {
 
         self.put_(dst, src, id, false)
     }
 
+    /// Initiate a transfer from data in memory address `src` at PE `id` to buffer slice `dst` and wait for its completion.
+    /// Buffer `dst` can be used immediately once the call returns.
+    /// 
+    /// # Safety
+    /// This function is unsafe as the src memory address might be mutated by other PEs at the same time 
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let mut rofi = RofiBuilder::new().build();
+    /// let mem = rofi.alloc(256);
+    /// let dst = [0_u8; 256];
+    /// unsafe { rofi.iget(mem[0..256].as_ptr() as usize, &mut dst, 1).unwrap() };
+    /// ```
     pub unsafe fn iget(&mut self, src: usize, dst: &mut[u8], id: usize) -> Result<(), std::io::Error> {
 
         self.get_(src, dst, id, true)
     }
 
+    /// Initiate a transfer from data in memory address `src` at PE `id` to buffer slice `dst` and return immediately.
+    /// Call returns before the operation has been completed so users are expected to check for its completion
+    /// before using the data in `dst`.
+    /// 
+    /// # Safety
+    /// This function is unsafe as the src memory address might be mutated by other PEs at the same time 
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let mut rofi = RofiBuilder::new().build();
+    /// let mem = rofi.alloc(256);
+    /// let dst = [0_u8; 256];
+    /// unsafe { rofi.get(mem[0..256].as_ptr() as usize, &mut dst, 1).unwrap() };
+    /// ```
     pub unsafe fn get(&mut self, src: usize, dst: &mut[u8], id: usize) -> Result<(), std::io::Error> {
 
         self.get_(src, dst, id, false)
     }
 
+    /// Block the calling PE until all outstanding remote operations have completed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let mut rofi = RofiBuilder::new().build();
+    /// let mem = rofi.alloc(256);
+    /// let dst = [0_u8; 256];
+    /// unsafe { rofi.get(mem[0..256].as_ptr() as usize, &mut dst, 1).unwrap() };
+    /// rofi.wait(); // make sure we got the data
+    /// ```
     pub fn wait(&mut self)  {
         self.wait_get_all().unwrap();
         self.wait_put_all().unwrap();
     }
 
-    pub fn mr_get(&self, addr: usize) -> Option<Rc<mr::MappedMemoryRegion>>{
-        
-        self.mr_manager.borrow().mr_get(addr)
-    }
-
-    pub fn mr_get_from_remote(&self, addr: usize, remote_id: usize) -> Option<Rc<mr::MappedMemoryRegion>> {
-
-        self.mr_manager.borrow().mr_get_from_remote(addr, remote_id)
-    }
-
+    /// Compute the virtual address corresponding to `local_addr` on PE `pe`.
+    /// 
+    /// When allocating a symmetric memory region, ROFI does not require that the virutal
+    /// addresses be aligned. In a sense, the virtual addresses are not symmetric, only the
+    /// offsets are. This function maps a certain address `local_addr` on the current node to the
+    /// corresponding virtual address on the remote PE `pe`.
+    /// 
+    /// 
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::Rofi;
+    ///
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let mut rofi = RofiBuilder::new().build();
+    /// let mem = rofi.alloc(256);
+    /// let remote_addr = rofi.get_remote_address(&mem[128..].as_ptr() as usize, 2);
+    /// ```
     pub fn get_remote_address(&self, local_addr: usize, pe: usize) -> usize {
         let remote_offset =  self.mr_manager.borrow().mr_get(local_addr).expect("Local address not found").get_remote_start(pe);
         let local_offset =  self.mr_manager.borrow().mr_get(local_addr).expect("Local address not found").get_start();
@@ -236,6 +417,25 @@ impl Rofi {
         (local_addr - local_offset) + remote_offset
     }
 
+    /// Compute the local virtual address corresponding to `remote_addr` on PE `pe`.
+    ///
+    /// When allocating a symmetric memory region, ROFI does not require that the virutal
+    /// addresses be aligned. In a sense, the virtual addresses are not symmetric, only the
+    /// offsets are. This function maps a certain address `remote_addr` on the remote PE `pe` to the
+    /// corresponding virtual address on the calling PE.
+    /// 
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::Rofi;
+    ///
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let mut rofi = RofiBuilder::new().build();
+    /// let remote_addr  = 0xFFF; // Must be part of a memory region in PE 2
+    /// let local_addr = rofi.get_local_from_remote_address(remote_addr, 2);
+    /// ```
     pub fn get_local_from_remote_address(&self, remote_addr: usize, pe: usize) -> usize {
         let local_offset =  self.mr_manager.borrow().mr_get_from_remote(remote_addr, pe).expect("Remote address not found").get_start();
         let remote_offset =  self.mr_manager.borrow().mr_get_from_remote(remote_addr, pe).expect("Remote address not found").get_remote_start(pe);
@@ -243,11 +443,35 @@ impl Rofi {
         (remote_addr - remote_offset) + local_offset
     }
 
+    /// Flush all completion queue events from previous communication calls, ensuring progress.
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let mut rofi = RofiBuilder::new().build();
+    /// rofi.flush();
+    /// ```
     pub fn flush(&mut self) {
         transport::progress(&self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr);
         transport::progress(&self.rx.cq, self.rx.cq_seq, &mut self.rx.cq_cntr);
     }
 
+
+    /// Block the calling PE until all processes in the job have entered the call as well.
+    /// 
+    /// # Collective Operation
+    /// Requires all PEs in the job to enter the call 
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let mut rofi = RofiBuilder::new().build();
+    /// rofi.barrier();
+    /// ```
     pub fn barrier(&mut self) {
         debug_println!("P[{}] Calling Barrier:", self.world.my_id);
         let n = 2;
@@ -284,6 +508,20 @@ impl Rofi {
         debug_println!("P[{}] End calling Barrier", self.world.my_id);
     }
 
+    /// Block the calling PE until all processes in the subset `pes` have entered the call as well.
+    /// 
+    /// # Collective Operation
+    /// Requires all PEs in the subset to enter the call 
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let mut rofi = RofiBuilder::new().build();
+    /// let pes: Vec<usize> = (0..3).collect();
+    /// rofi.sub_barrier(&pes);
+    /// ```
     pub fn sub_barrier(&mut self, pes: &[usize]) {
         
         let n = 2_usize;
@@ -318,6 +556,16 @@ impl Rofi {
                 }
             } 
         }
+    }
+
+    fn mr_get(&self, addr: usize) -> Option<Rc<mr::MappedMemoryRegion>>{
+        
+        self.mr_manager.borrow().mr_get(addr)
+    }
+
+    fn mr_get_from_remote(&self, addr: usize, remote_id: usize) -> Option<Rc<mr::MappedMemoryRegion>> {
+
+        self.mr_manager.borrow().mr_get_from_remote(addr, remote_id)
     }
 
     unsafe fn put_(&mut self, mut dst: usize, src: &[u8], id: usize, block: bool) -> Result<(), std::io::Error> {
@@ -512,18 +760,10 @@ impl Rofi {
         rma_iovs
     }
 
-    fn exchange_keys(&mut self, addr: libfabric::Address, key: u64) -> Vec<RmaIoVec> {
+    fn exchange_mr_info(&mut self, addr: u64, key: u64) -> Vec<RmaIoVec> {
 
-        let mut rma_iov = libfabric::RmaIoVec::new().key(key);
-    
-        if self.info.get_domain_attr().get_mr_mode().is_basic() || self.info.get_domain_attr().get_mr_mode().is_virt_addr() {
-            rma_iov = rma_iov.address(addr);
-        }
-
-        let raw_iov = unsafe{ std::slice::from_raw_parts_mut(&mut rma_iov as *mut libfabric::RmaIoVec as *mut u8, std::mem::size_of::<libfabric::RmaIoVec>())};
-        let raw_iovs = self.pmi.exchange_data("ep_addr", raw_iov).unwrap();
-
-        raw_iovs.iter().map(|x| {raw_iov.copy_from_slice(x); rma_iov.clone()} ).collect()
+        let pes: Vec<_> = (0..self.world.nnodes).collect();
+        self.sub_exchange_mr_info(addr, key, &pes)
     }
 
     unsafe fn post_rma_inject(&mut self, rma_op: &RmaOp, remote: &libfabric::RmaIoVec, buf: &[u8], id: usize) { // Unsafe because we write to remote 

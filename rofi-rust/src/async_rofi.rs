@@ -7,6 +7,7 @@ use std::rc::Rc;
 use debug_print::debug_println;
 use crate::MappedMemoryRegion;
 
+
 pub struct RofiAsyncRmaFuture<'a> {
     rofi: RefCell<&'a mut Rofi>,
     rma_op: RmaOp,
@@ -151,6 +152,37 @@ impl<'a> async_std::future::Future for RofiAsyncEventFuture<'a> {
 
 impl Rofi {
     
+    /// `async` implementation of the corresponding [alloc](Rofi::alloc) method.
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let rofi = RofiBuilder::new().build();
+    /// let mem = rofi.alloc_async(256).await;
+    /// ```
+    pub async fn alloc_async(&mut self, size: usize) ->  Rc<MappedMemoryRegion> {
+        
+        let mem = self.mr_manager.borrow_mut().alloc(&self.info, &self.domain, &self.ep, size);
+        let ptr = mem.get_mem().borrow().as_ptr() as u64;
+        let remote_iovs = self.exchange_mr_info_async(ptr, mem.get_key()).await;
+        mem.set_iovs(remote_iovs);
+    
+        mem.clone()
+    }
+
+    /// `async` implementation of the corresponding [sub_alloc](Rofi::sub_alloc) method.
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    /// 
+    /// let pes: Vec<usize> = (0..3).collect();
+    /// let rofi = RofiBuilder::new().build();
+    /// let mem = rofi.sub_alloc_async(256, &pes).await;
+    /// ```
     pub async fn sub_alloc_async(&mut self, size: usize, pes: &[usize]) ->  Rc<MappedMemoryRegion> {
         
         let mem = self.mr_manager.borrow_mut().alloc(&self.info, &self.domain, &self.ep, size);
@@ -167,12 +199,41 @@ impl Rofi {
         RofiAsyncRmaFuture{rofi: std::cell::RefCell::new(self), rma_op: RmaOp::RmaRead}.await;
     }
 
+    /// `async` implementation of the corresponding [iput](Rofi::iput) method.
+    /// 
+    /// # Safety
+    /// This function is unsafe as the destination memory address might be mutated by other PEs at the same time
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let mut rofi = RofiBuilder::new().build();
+    /// let mem = rofi.alloc(256);
+    /// let src = [0_u8; 256];
+    /// 
+    /// unsafe { rofi.put_async(&mem[128..].as_ptr() as usize, &src, 1).await };
+    /// ```
     pub async unsafe fn put_async<'a>(&'a mut self, dst: usize, src: &'a [u8], id: usize) {
 
         self.put_(dst, src, id, false).unwrap();
         RofiAsyncRmaFuture{rofi: std::cell::RefCell::new(self), rma_op: RmaOp::RmaWrite}.await;
     }
 
+    /// `async` implementation of the corresponding [barrier](Rofi::barrier) method.
+    /// 
+    /// # Collective Operation
+    /// Requires all PEs in the job to enter the call 
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let mut rofi = RofiBuilder::new().build();
+    /// rofi.barrier_async();
+    /// ```
     pub async fn barrier_async(&mut self) {
         debug_println!("P[{}] Calling Barrier:", self.world.my_id);
         let n = 2;
@@ -202,6 +263,20 @@ impl Rofi {
         RofiAsyncBarrierFuture{rofi: std::cell::RefCell::new(self) , recv_pes: std::cell::RefCell::new(round_barriers)}.await;
     }
 
+    /// `async` implementation of the corresponding [sub_barrier](Rofi::sub_barrier) method.
+    /// 
+    /// # Collective Operation
+    /// Requires all PEs in the subset to enter the call 
+    /// 
+    /// # Examples
+    ///
+    /// ```
+    /// use rofi_rust::RofiBuilder;
+    ///
+    /// let mut rofi = RofiBuilder::new().build();
+    /// let pes: Vec<usize> = (0..3).collect();
+    /// rofi.sub_barrier_async(&pes).await;
+    /// ```
     pub async fn sub_barrier_async(&mut self, pes: &[usize]) {
         
         let n = 2_usize;
@@ -278,15 +353,32 @@ impl Rofi {
 
         rma_iovs
     }
+
+    async fn exchange_mr_info_async(&mut self, addr: u64, key: u64) -> Vec<RmaIoVec> {
+        
+        let pes: Vec<_> = (0..self.world.nnodes).collect();
+        self.sub_exchange_mr_info_async(addr, key, &pes).await
+    }
+
 }
 
 
 mod tests {
+
+
+    #[test]
+    fn alloc_async() {
+        async_std::task::block_on(async {
+            let mut rofi = crate::RofiBuilder::new().build().unwrap();
+            let _mem = rofi.alloc_async(256).await;
+        });
+    }
+
     #[test]
     fn put_async() {
         async_std::task::block_on(async {
             const N : usize = 1 << 8;
-            let mut rofi = RofiBuilder::new().build().unwrap();
+            let mut rofi = crate::RofiBuilder::new().build().unwrap();
             let size = rofi.get_size();
             // assert!(size >= 2);
 
@@ -294,7 +386,7 @@ mod tests {
             let send_id = (my_id + 1) % size ;
             let recv_id =  if my_id as i64 - 1 < 0 {size as i64 -1 } else { my_id as i64 -1} as usize ;
 
-            let mem = rofi.alloc(N * size);
+            let mem = rofi.alloc_async(N * size).await;
 
             for i in 0..N {
                 mem.get_mem().borrow_mut()[my_id* N + i] = (i % N) as u8;
@@ -317,14 +409,14 @@ mod tests {
     fn get_async() {
         async_std::task::block_on(async {
             const N : usize = 1 << 7;
-            let mut rofi = RofiBuilder::new().build().unwrap();
+            let mut rofi = crate::RofiBuilder::new().build().unwrap();
             let size = rofi.get_size();
             assert!(size >= 2);
 
             let my_id = rofi.get_id();
             let recv_id = (my_id + 1) % size ;
 
-            let mem = rofi.alloc(N* rofi.get_size());
+            let mem = rofi.alloc_async(N* rofi.get_size()).await;
 
             for i in 0..N {
                 mem.get_mem().borrow_mut()[my_id * N + i] = (i % N) as u8;
@@ -347,7 +439,7 @@ mod tests {
     fn sub_barrier_async() {
         async_std::task::block_on(async {
             let exclude_id = 1;
-            let mut rofi = RofiBuilder::new().build().unwrap();
+            let mut rofi = crate::RofiBuilder::new().build().unwrap();
             let size = rofi.get_size();
             assert!(size > 2);
 
@@ -365,7 +457,7 @@ mod tests {
             let exclude_id = 1;
 
             const N: usize = 256;
-            let mut rofi = RofiBuilder::new().build().unwrap();
+            let mut rofi = crate::RofiBuilder::new().build().unwrap();
             let size = rofi.get_size();
             assert!(size > 2);
             
@@ -384,7 +476,7 @@ mod tests {
             let exclude_id = 1;
 
             const N: usize = 256;
-            let mut rofi = RofiBuilder::new().build().unwrap();
+            let mut rofi = crate::RofiBuilder::new().build().unwrap();
             let my_id = rofi.get_id();
             let size = rofi.get_size();
             assert!(size > 2);
@@ -419,7 +511,7 @@ mod tests {
             let exclude_id = 1;
 
             const N: usize = 256;
-            let mut rofi = RofiBuilder::new().build().unwrap();
+            let mut rofi = crate::RofiBuilder::new().build().unwrap();
             let my_id = rofi.get_id();
             let size = rofi.get_size();
             assert!(size > 2);
