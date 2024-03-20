@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+pmix-sys = {path = "../pmix-sys/", optional = true, default-features = false}
 pmi2-sys = {path = "../pmi2-sys/", optional = true, default-features = false}
 libfabric = {path = "../libfabric/", default-features = false}
 pmi-sys = {path = "../pmi-sys/", optional = true, default-features = false}
@@ -13,8 +14,10 @@ page_size= "0.6.0"
 memmap = "0.7.0"
 debug_print = "1.0.0"
 async-std = "1.12.0"
+async-io = "2.3.1"
 
 [features]
 default = ["with-pmi1"]
+with-pmix = ["dep:pmix-sys"] 
 with-pmi2 = ["dep:pmi2-sys"] 
 with-pmi1 = ["dep:pmi-sys"]

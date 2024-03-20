@@ -8,6 +8,11 @@ pub(crate) mod pmi2;
 #[cfg(feature = "with-pmi2")]
 pub(crate) use pmi2::Pmi2;
 
+#[cfg(feature = "with-pmix")]
+pub(crate) mod pmix;
+#[cfg(feature = "with-pmix")]
+pub(crate) use pmix::PmiX;
+
 pub(crate) mod pmi_trait;
 pub(crate) use pmi_trait::PmiTrait;
 
