@@ -50,7 +50,7 @@ rofi_mr_desc *mr_add(rofi_transport_t *rofi, size_t size, unsigned long mode) {
     rofi_mr_desc *el, *tmp;
     void *addr = NULL;
     int err;
-    unsigned long PageSize = rofi->desc.PageSize;
+    unsigned long PageSize = rofi->PageSize;
 
     el = malloc(sizeof(rofi_mr_desc));
     if (!(el)) {
@@ -58,13 +58,13 @@ rofi_mr_desc *mr_add(rofi_transport_t *rofi, size_t size, unsigned long mode) {
         goto err;
     }
 
-    el->iov = (struct fi_rma_iov *)calloc(1, rofi->desc.nodes * sizeof(struct fi_rma_iov));
+    el->iov = (struct fi_rma_iov *)calloc(1, rofi->dist->desc.pes * sizeof(struct fi_rma_iov));
     if (!(el->iov)) {
         ERR_MSG("Error allocating memory for remote memory region keys. Aborting!");
         goto err_el;
     }
 #ifdef _DEBUG
-    for (int i = 0; i < rofi->desc.nodes; i++)
+    for (int i = 0; i < rofi->dist->desc.pes; i++)
         DEBUG_MSG("\t Node: %o Key: 0x%lx Addr: 0x%lx", i, el->iov[i].key, el->iov[i].addr);
 #endif
 
@@ -83,11 +83,21 @@ rofi_mr_desc *mr_add(rofi_transport_t *rofi, size_t size, unsigned long mode) {
         goto err_lock;
     }
 
-    err = fi_mr_reg(rofi->domain, addr, size,
+    if (rofi->shm) {
+        err = fi_mr_reg(rofi->shm->domain, addr, size,
+                        FI_READ | FI_WRITE | FI_REMOTE_READ | FI_REMOTE_WRITE,
+                        0, mr_next_key, 0x0,
+                        &(el->fid), &(el->ctx));
+        if (err != FI_SUCCESS) {
+            ERR_MSG("Error creating OFI memroy region (%d). Aborting.", err);
+            goto err_mmap;
+        }
+    }
+
+    err = fi_mr_reg(rofi->dist->domain, addr, size,
                     FI_READ | FI_WRITE | FI_REMOTE_READ | FI_REMOTE_WRITE,
                     0, mr_next_key, 0x0,
                     &(el->fid), &(el->ctx));
-
     if (err != FI_SUCCESS) {
         ERR_MSG("Error creating OFI memroy region (%d). Aborting.", err);
         goto err_mmap;

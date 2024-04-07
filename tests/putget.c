@@ -12,6 +12,7 @@
 
 typedef struct {
     unsigned long size;
+    unsigned long msg_size;
     struct timespec start, end;
     double time;
     double tput;
@@ -88,6 +89,7 @@ int main(void) {
     for (i = 0; i < 27; i++) {
         memset((void *)target, 0, N);
         int num_bytes = (int)pow(2, i);
+        printf("[%u] Testing with %lu bytes\n", me, num_bytes);
         int exp = 20;
         if (num_bytes <= 2048) {
             exp = 18 + i;
@@ -122,26 +124,26 @@ int main(void) {
         rofi_wait();
         rofi_barrier();
         clock_gettime(CLOCK_MONOTONIC, &(data[i].end));
+        if (me) {
+            data[i].size = (int)pow(2, exp);
+            data[i].msg_size = num_bytes;
+            data[i].time = ((double)tdiff(data[i].end, data[i].start)) / BILLION;
+            data[i].tput = (((double)data[i].size) / MILLION) / data[i].time;
+        }
 
         // if (me == ptest) {
         //     err += verify_data(src, target, (int)pow(2, exp));
         //     // err += verify_data(src, target, (int)pow(2, exp));
         // }
-
-        if (me) {
-            data[i].size = (int)pow(2, exp);
-            data[i].time = ((double)tdiff(data[i].end, data[i].start)) / BILLION;
-            data[i].tput = (((double)data[i].size) / MILLION) / data[i].time;
-        }
     }
 
     rofi_barrier();
 
     if (me) {
-        printf("\t %-10s \t %-11s \t %-19s\n", "Size (MBs)", "Time (sec)", "Throughput (MB/sec)");
+        printf("\t %-10s \t %-11s \t %-11s \t %-19s\n", "Size (Bs)", "Message Size(B)", "Time (sec)", "Throughput (MB/sec)");
         for (i = 0; i < ntests; i++)
-            printf("\t %10lu \t %06.4f \t %16.2f\n",
-                   data[i].size, data[i].time, data[i].tput);
+            printf("\t %10lu \t %10lu \t %06.4f \t %16.2f\n",
+                   data[i].size, data[i].msg_size, data[i].time, data[i].tput);
     }
     rofi_barrier();
 

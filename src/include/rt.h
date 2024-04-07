@@ -5,6 +5,7 @@ int rt_init(void);
 int rt_finit(void);
 int rt_get_rank(void);
 int rt_get_size(void);
+int rt_get_node_rank(int);
 int rt_put(char *, void *, size_t);
 int rt_get(int, char *, void *, size_t);
 int rt_exchange(void);

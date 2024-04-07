@@ -44,6 +44,8 @@
 #include <rdma/fi_domain.h>
 #include <rdma/fi_rma.h>
 
+#include "rofi_internal.h"
+
 #define ROFI_TRANSPORT_ERR_MSG(call, retv)                                               \
     do {                                                                                 \
         fprintf(stderr, "[PE %d][ROFI TRANSPORT ERR][%s:%d] " call " failed: %s (%d)\n", \
@@ -55,31 +57,31 @@
        __typeof__ (b) _b = (b); \
      _a < _b ? _a : _b; })
 
-int rofi_transport_fini(rofi_transport_t *rofi);
-int rofi_transport_init(struct fi_info *hints, rofi_transport_t *rofi, rofi_names_t *prov_names, rofi_names_t *domain_names);
-int rofi_transport_init_fabric_resources(rofi_transport_t *rofi);
-int rofi_transport_init_endpoint_resources(rofi_transport_t *rofi);
-int rofi_transport_init_av(rofi_transport_t *rofi);
+int rofi_transport_fini(rofi_sub_transport_t *trans);
+int rofi_transport_init(struct fi_info *hints, rofi_sub_transport_t *trans, rofi_names_t *prov_names, rofi_names_t *domain_names);
+int rofi_transport_init_fabric_resources(rofi_sub_transport_t *trans);
+int rofi_transport_init_endpoint_resources(rofi_sub_transport_t *trans);
+int rofi_transport_init_av(rofi_sub_transport_t *trans);
 
-int rofi_transport_progress(rofi_transport_t *rofi);
-int rofi_transport_ctx_check_err(rofi_transport_t *rofi, int err);
-int rofi_transport_check_rma_err(rofi_transport_t *rofi, int ret);
-int rofi_transport_wait_on_cntr(rofi_transport_t *rofi, uint64_t *pending_cntr, struct fid_cntr *cntr);
-int rofi_transport_wait_on_context_comp(rofi_transport_t *rofi, void *context);
-int rofi_transport_wait_on_event(rofi_transport_t *rofi, uint32_t event, void *context);
+int rofi_transport_progress(rofi_sub_transport_t *trans);
+int rofi_transport_ctx_check_err(rofi_sub_transport_t *trans, int err);
+int rofi_transport_check_rma_err(rofi_sub_transport_t *trans, int ret);
+int rofi_transport_wait_on_cntr(rofi_sub_transport_t *trans, uint64_t *pending_cntr, struct fid_cntr *cntr);
+int rofi_transport_wait_on_context_comp(rofi_sub_transport_t *trans, void *context);
+int rofi_transport_wait_on_event(rofi_sub_transport_t *trans, uint32_t event, void *context);
 
-int rofi_transport_put_inject(rofi_transport_t *rofi, struct fi_rma_iov *rma_iov, uint64_t pe, const void *src_addr, size_t len);
-int rofi_transport_put_large(rofi_transport_t *rofi, struct fi_rma_iov *rma_iov, uint64_t pe, const void *src_addr, size_t len, void *desc, void *context);
-int rofi_transport_put(rofi_transport_t *rofi, struct fi_rma_iov *rma_iov, uint64_t pe, const void *src_addr, size_t len, void *desc, void *context);
-int rofi_transport_put_wait_all(rofi_transport_t *rofi);
+int rofi_transport_put_inject(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, uint64_t pe, const void *src_addr, size_t len);
+int rofi_transport_put_large(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, uint64_t pe, const void *src_addr, size_t len, void *desc, void *context);
+int rofi_transport_put(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, uint64_t pe, const void *src_addr, size_t len, void *desc, void *context);
+int rofi_transport_put_wait_all(rofi_sub_transport_t *trans);
 
-int rofi_transport_get_small(rofi_transport_t *rofi, struct fi_rma_iov *rma_iov, uint64_t pe, void *dst_addr, size_t len, void *desc, void *context);
-int rofi_transport_get_large(rofi_transport_t *rofi, struct fi_rma_iov *rma_iov, uint64_t pe, void *dst_addr, size_t len, void *desc, void *context);
-int rofi_transport_get(rofi_transport_t *rofi, struct fi_rma_iov *rma_iov, uint64_t pe, void *dst_addr, size_t len, void *desc, void *context);
-int rofi_transport_get_wait_all(rofi_transport_t *rofi);
+int rofi_transport_get_small(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, uint64_t pe, void *dst_addr, size_t len, void *desc, void *context);
+int rofi_transport_get_large(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, uint64_t pe, void *dst_addr, size_t len, void *desc, void *context);
+int rofi_transport_get(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, uint64_t pe, void *dst_addr, size_t len, void *desc, void *context);
+int rofi_transport_get_wait_all(rofi_sub_transport_t *trans);
 
-int rofi_transport_send(rofi_transport_t *rofi, void *buf, size_t len, uint64_t pe);
-int rofi_transport_recv(rofi_transport_t *rofi, void *buf, size_t len);
+int rofi_transport_send(rofi_sub_transport_t *trans, void *buf, size_t len, uint64_t pe);
+int rofi_transport_recv(rofi_sub_transport_t *trans, void *buf, size_t len);
 
 int rofi_transport_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr);
 int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr, uint64_t *pes, uint64_t num_pes);

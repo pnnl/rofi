@@ -34,7 +34,7 @@
 int rofi_init(char *provs, char *domains) {
     int ret = 0;
 
-    rofi.desc.status = ROFI_STATUS_NONE;
+    rofi.status = ROFI_STATUS_NONE;
 
     DEBUG_MSG("Initilizing ROFI runtime...");
 
@@ -48,7 +48,7 @@ int rofi_init(char *provs, char *domains) {
     rt_barrier();
 
     DEBUG_MSG("Initialization succesfully completed!");
-    rofi.desc.status = ROFI_STATUS_ACTIVE;
+    rofi.status = ROFI_STATUS_ACTIVE;
 
     return ret;
 }
@@ -66,8 +66,8 @@ int rofi_init(char *provs, char *domains) {
  *
  */
 unsigned int rofi_get_size(void) {
-    assert(rofi.desc.status == ROFI_STATUS_ACTIVE);
-    DEBUG_MSG("Getting number of processes (%u)...", rofi.desc.nodes);
+    assert(rofi.status == ROFI_STATUS_ACTIVE);
+    DEBUG_MSG("Getting number of processes (%u)...", rofi.dist->desc.pes);
     return rofi_get_size_internal();
 }
 
@@ -84,8 +84,8 @@ unsigned int rofi_get_size(void) {
  *
  */
 unsigned int rofi_get_id(void) {
-    assert(rofi.desc.status == ROFI_STATUS_ACTIVE);
-    DEBUG_MSG("Getting process ID (%u)...", rofi.desc.nid);
+    assert(rofi.status == ROFI_STATUS_ACTIVE);
+    DEBUG_MSG("Getting process ID (%u)...", rofi.dist->desc.pe_id);
     return rofi_get_id_internal();
 }
 
@@ -104,7 +104,7 @@ unsigned int rofi_get_id(void) {
  *
  */
 int rofi_finit(void) {
-    assert(rofi.desc.status == ROFI_STATUS_ACTIVE);
+    assert(rofi.status == ROFI_STATUS_ACTIVE);
     DEBUG_MSG("Finalizing ROFI runtime...");
     rofi_finit_internal();
     DEBUG_MSG("ROFI runtime shutdown completed.");
@@ -146,9 +146,9 @@ int rofi_flush() {
  *
  */
 int rofi_put(void *dst, void *src, size_t size, unsigned int id, unsigned long flags) {
-    assert(rofi.desc.status == ROFI_STATUS_ACTIVE);
+    assert(rofi.status == ROFI_STATUS_ACTIVE);
 
-    if (dst == NULL || src == NULL || size == 0 || id >= rofi.desc.nodes) {
+    if (dst == NULL || src == NULL || size == 0 || id >= rofi.dist->desc.pes) {
         ERR_MSG("Invalide argument.");
         return -1;
     }
@@ -177,9 +177,9 @@ int rofi_put(void *dst, void *src, size_t size, unsigned int id, unsigned long f
  *
  */
 int rofi_iput(void *dst, void *src, size_t size, unsigned int id, unsigned long flags) {
-    assert(rofi.desc.status == ROFI_STATUS_ACTIVE);
+    assert(rofi.status == ROFI_STATUS_ACTIVE);
 
-    if (dst == NULL || src == NULL || size == 0 || id >= rofi.desc.nodes) {
+    if (dst == NULL || src == NULL || size == 0 || id >= rofi.dist->desc.pes) {
         ERR_MSG("Invalide argument.");
         return -1;
     }
@@ -212,9 +212,9 @@ int rofi_iput(void *dst, void *src, size_t size, unsigned int id, unsigned long 
  *
  */
 int rofi_get(void *dst, void *src, size_t size, unsigned int id, unsigned long flags) {
-    assert(rofi.desc.status == ROFI_STATUS_ACTIVE);
+    assert(rofi.status == ROFI_STATUS_ACTIVE);
 
-    if (dst == NULL || src == NULL || size == 0 || id >= rofi.desc.nodes) {
+    if (dst == NULL || src == NULL || size == 0 || id >= rofi.dist->desc.pes) {
         ERR_MSG("Invalide argument.");
         return -1;
     }
@@ -243,9 +243,9 @@ int rofi_get(void *dst, void *src, size_t size, unsigned int id, unsigned long f
  *
  */
 int rofi_iget(void *dst, void *src, size_t size, unsigned int id, unsigned long flags) {
-    assert(rofi.desc.status == ROFI_STATUS_ACTIVE);
+    assert(rofi.status == ROFI_STATUS_ACTIVE);
 
-    if (dst == NULL || src == NULL || size == 0 || id >= rofi.desc.nodes) {
+    if (dst == NULL || src == NULL || size == 0 || id >= rofi.dist->desc.pes) {
         ERR_MSG("Invalide argument.");
         return -1;
     }
@@ -274,9 +274,9 @@ int rofi_iget(void *dst, void *src, size_t size, unsigned int id, unsigned long 
  *
  */
 int rofi_send(unsigned int pe, void *buf, size_t size, unsigned long flags) {
-    assert(rofi.desc.status == ROFI_STATUS_ACTIVE);
+    assert(rofi.status == ROFI_STATUS_ACTIVE);
 
-    if (buf == NULL || size == 0 || pe >= rofi.desc.nodes) {
+    if (buf == NULL || size == 0 || pe >= rofi.dist->desc.pes) {
         ERR_MSG("Invalid argument.");
         return -1;
     }
@@ -303,7 +303,7 @@ int rofi_send(unsigned int pe, void *buf, size_t size, unsigned long flags) {
  *
  */
 int rofi_recv(void *buf, size_t size, unsigned long flags) {
-    assert(rofi.desc.status == ROFI_STATUS_ACTIVE);
+    assert(rofi.status == ROFI_STATUS_ACTIVE);
 
     if (buf == NULL || size == 0) {
         ERR_MSG("Invalid argument.");
@@ -328,10 +328,10 @@ int rofi_recv(void *buf, size_t size, unsigned long flags) {
  *
  */
 void rofi_barrier(void) {
-    assert(rofi.desc.status == ROFI_STATUS_ACTIVE);
-    DEBUG_MSG("Process %u/%u entering barrier...", rofi.desc.nid, rofi.desc.nodes);
+    assert(rofi.status == ROFI_STATUS_ACTIVE);
+    DEBUG_MSG("Process %u/%u entering barrier...", rofi.dist->desc.pe_id, rofi.dist->desc.pes);
     rofi_barrier_internal();
-    DEBUG_MSG("Process %u/%u leaving barrier...", rofi.desc.nid, rofi.desc.nodes);
+    DEBUG_MSG("Process %u/%u leaving barrier...", rofi.dist->desc.pe_id, rofi.dist->desc.pes);
 }
 
 /**

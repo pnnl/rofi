@@ -45,11 +45,9 @@ typedef struct rofi_transport_t rofi_transport_t;
 #define ROFI_SYNC 0x2
 
 typedef struct {
-    unsigned long status;
-    unsigned int nodes;
-    unsigned int nid;
+    unsigned int pes;
+    unsigned int pe_id;
     int addrlen;
-    unsigned long PageSize;
     uint64_t max_message_size;
     uint64_t inject_size;
 } rofi_desc_t;
@@ -59,32 +57,70 @@ typedef struct rofi_prov_names_t {
     int num;
 } rofi_names_t;
 
-struct rofi_transport_t {
+// typedef struct {
+//     struct fid_fabric *fabric;
+//     struct fid_domain *domain;
+//     struct fid_eq *eq;
+// } rofi_fab_resources_t;
+
+// typedef struct {
+//     struct fid_cntr *put_cntr;
+//     struct fid_cntr *get_cntr;
+//     struct fid_cntr *send_cntr;
+//     struct fid_cntr *recv_cntr;
+//     uint64_t pending_put_cntr;
+//     uint64_t pending_get_cntr;
+//     uint64_t pending_send_cntr;
+//     uint64_t pending_recv_cntr;
+// } rofi_counters_t;
+
+// typedef struct {
+//     struct fid_cq *cq;
+//     struct fid_av *av;
+//     struct fid_ep *ep;
+//     fi_addr_t *remote_addrs;
+// } rofi_ep_resources_t;
+// typedef struct {
+//     struct fi_info *info;
+//     rofi_fab_resources_t fab_resources;
+//     rofi_counters_t counters;
+//     rofi_ep_resources_t ep_resources;
+// } rofi_shm_transport_t;
+
+typedef struct rofi_sub_transport_t {
+    rofi_desc_t desc;
     struct fi_info *info;
     struct fid_fabric *fabric;
     struct fid_domain *domain;
+    struct fid_eq *eq;
+    struct fid_cq *cq;
     struct fid_av *av;
     struct fid_ep *ep;
-    struct fid_eq *eq;
+    fi_addr_t *remote_addrs;
     struct fid_cntr *put_cntr;
     struct fid_cntr *get_cntr;
     struct fid_cntr *send_cntr;
     struct fid_cntr *recv_cntr;
-    struct fid_cq *cq;
-    fi_addr_t *remote_addrs;
     uint64_t pending_put_cntr;
     uint64_t pending_get_cntr;
     uint64_t pending_send_cntr;
     uint64_t pending_recv_cntr;
-    rofi_desc_t desc;
+    pthread_mutex_t lock;
+    uint64_t fi_collective;
+    int local;
+} rofi_sub_transport_t;
+
+struct rofi_transport_t {
+    unsigned long status;
+    struct rofi_sub_transport_t *dist;
+    struct rofi_sub_transport_t *shm;
+    unsigned long PageSize;
     rofi_mr_desc *mr;
     uint64_t global_barrier_id;
     uint64_t *global_barrier_buf;
     uint64_t *sub_alloc_barrier_buf;
     struct fi_rma_iov *sub_alloc_buf;
-    pthread_mutex_t lock;
     pthread_rwlock_t mr_lock;
-    uint64_t fi_collective;
 };
 
 extern rofi_transport_t rofi;

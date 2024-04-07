@@ -17,7 +17,7 @@ int main(void) {
     int ret = 0;
 
     rofi_banner("PUT Test");
-    rofi_init("verbs",NULL);
+    rofi_init("verbs", NULL);
 
     np = rofi_get_size();
     // if(np != 2){
@@ -33,6 +33,7 @@ int main(void) {
 
     uint64_t *src;
     uint64_t *target[n];
+    printf("going to alloc!\n");
     ret = rofi_alloc((n + 1) * num_rounds * sizeof(uint64_t), 0x0, (void **)&src);
     if (ret) {
         printf("Error allocating ROFI heap");
