@@ -64,7 +64,7 @@ int rofi_transport_fini(rofi_sub_transport_t *trans) {
 
     ret = fi_close(&trans->cq->fid);
     if (ret) {
-        ROFI_TRANSPORT_ERR_MSG("fl_close", ret);
+        ROFI_TRANSPORT_ERR_MSG("fi_close", ret);
         trans->cq = NULL;
     }
     DEBUG_MSG("cq closed");
@@ -82,6 +82,20 @@ int rofi_transport_fini(rofi_sub_transport_t *trans) {
         trans->get_cntr = NULL;
     }
     DEBUG_MSG("get_cntr closed");
+
+    ret = fi_close(&trans->send_cntr->fid);
+    if (ret) {
+        ROFI_TRANSPORT_ERR_MSG("fi_close", ret);
+        trans->send_cntr = NULL;
+    }
+    DEBUG_MSG("send_cntr closed");
+
+    ret = fi_close(&trans->recv_cntr->fid);
+    if (ret) {
+        ROFI_TRANSPORT_ERR_MSG("fi_close", ret);
+        trans->recv_cntr = NULL;
+    }
+    DEBUG_MSG("recv_cntr closed");
 
     ret = fi_close(&trans->av->fid);
     if (ret) {
@@ -228,7 +242,7 @@ void rofi_transport_find_provider(struct fi_info *hints, rofi_sub_transport_t *t
     fi_freeinfo(prov);
 }
 
-int rofi_transport_init(struct fi_info *hints, rofi_sub_transport_t *trans, rofi_names_t *prov_names, rofi_names_t *domain_names) {
+int rofi_transport_init(struct fi_info *hints, rofi_transport_t *rofi, rofi_sub_transport_t *trans, rofi_names_t *prov_names, rofi_names_t *domain_names) {
     rofi_transport_find_provider(hints, trans, prov_names, domain_names);
     if (trans->info == NULL) {
         hints->caps = hints->caps ^ FI_COLLECTIVE; // try without collective
@@ -269,10 +283,9 @@ int rofi_transport_init(struct fi_info *hints, rofi_sub_transport_t *trans, rofi
     }
     else {
         trans->fi_collective = FI_COLLECTIVE;
+
         DEBUG_MSG("fi_query_collective: FI_ALLGATHER supported");
     }
-
-    trans->fi_collective = 0;
 
     ret = rofi_transport_init_endpoint_resources(trans);
     if (ret) {
@@ -289,13 +302,14 @@ int rofi_transport_init(struct fi_info *hints, rofi_sub_transport_t *trans, rofi
     }
     char buf[256];
     size_t buflen = 256;
-    DEBUG_MSG("epname: %s", fi_av_straddr(trans->av, epname, buf, &buflen));
+
     rt_put("epname_len", &len, sizeof(size_t));
     rt_put("epname", epname, len);
+    DEBUG_MSG("epname_len: %d epname: %s", len, fi_av_straddr(trans->av, epname, buf, &buflen));
     trans->desc.addrlen = len;
     rt_exchange();
 
-    ret = rofi_transport_init_av(trans);
+    ret = rofi_transport_init_av(rofi, trans);
     if (ret) {
         // already would have printed the error.
         return ret;
@@ -477,17 +491,31 @@ int rofi_transport_init_endpoint_resources(rofi_sub_transport_t *trans) {
     return ret;
 }
 
-int rofi_transport_init_av(rofi_sub_transport_t *trans) {
-    char *all_addrs = (char *)malloc(trans->desc.pes * trans->desc.addrlen);
-    assert(all_addrs);
+int rofi_transport_init_av(rofi_transport_t *rofi, rofi_sub_transport_t *trans) {
+    int max_addr_len = trans->desc.addrlen + 16;
+    char *all_addrs = (char *)malloc(trans->desc.pes * max_addr_len);
+
+    // DEBUG_MSG("addrlenn = %u", trans->desc.addrlen);
+    // assert(all_addrs);
 
     int num_nodes = 0;
-    for (int i = 0; i < trans->desc.pes; i++) {
+    int cur_idx = 0;
+    for (int i = 0; i < rofi->pes; i++) {
         if (!trans->local || rt_get_node_rank(i) != -1) {
-            char *addr_ptr = all_addrs + i * trans->desc.addrlen;
+            char *addr_ptr = all_addrs + cur_idx;
+            // char *buf = (char *)malloc(256);
+            size_t len;
+            int ret = rt_get(i, "epname_len", &len, sizeof(size_t));
+            if (ret) {
+                ERR_MSG("Error getting EP address len from %i (%d).", i, ret);
+                return ret;
+            }
+            DEBUG_MSG("Node %d len: %d", i, len);
+            cur_idx += len;
+            // char addr_ptr[len + 1];
             char buf[256];
             size_t buflen = 256;
-            int ret = rt_get(i, "epname", addr_ptr, trans->desc.addrlen);
+            ret = rt_get(i, "epname", addr_ptr, len);
             DEBUG_MSG("Got EP address name from %i (%s).", i, fi_av_straddr(trans->av, addr_ptr, buf, &buflen));
             if (ret) {
                 ERR_MSG("Error getting EP address name from %i (%d).", i, ret);
@@ -496,6 +524,7 @@ int rofi_transport_init_av(rofi_sub_transport_t *trans) {
             num_nodes += 1;
         }
     }
+    assert(num_nodes == trans->desc.pes);
 
     DEBUG_MSG("FI_AV_INSERT");
     int ret = fi_av_insert(trans->av, all_addrs, num_nodes, trans->remote_addrs, 0, NULL);
@@ -722,7 +751,11 @@ int rofi_transport_wait_on_context_comp(rofi_sub_transport_t *trans, void *conte
 int rofi_transport_put_inject(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, fi_addr_t pe, const void *src_addr, size_t len) {
     pthread_mutex_lock(&trans->lock);
     trans->pending_put_cntr += 1;
+    // if (pe == 3 && rma_iov->key == 2) {
+    //     pe = 0;
+    // }
     DEBUG_MSG("fi_inject_write %p %p %d %d %p 0x%lx", trans->ep, src_addr, len, pe, rma_iov->addr, rma_iov->key);
+
     int ret = fi_inject_write(trans->ep, src_addr, len, pe, rma_iov->addr, rma_iov->key);
     while (ret) { // retry while FI_EAGAIN
         ret = rofi_transport_check_rma_err(trans, ret);
@@ -879,10 +912,10 @@ int rofi_transport_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr) {
 
     struct fi_rma_iov rma_iov;
     rma_iov.addr = (uint64_t)mr->start;
-    rma_iov.key = fi_mr_key(mr->fid);
+    rma_iov.key = fi_mr_key(mr->dist->fid);
     DEBUG_MSG("Exchanging MR Info (key: 0x%lx, addr: 0x%lx)....", rma_iov.key, rma_iov.addr);
 
-    int ret = rt_exchange_data("mr_info", &rma_iov, sizeof(struct fi_rma_iov), mr->iov, rofi->dist->desc.pe_id, rofi->dist->desc.pes);
+    int ret = rt_exchange_data("mr_info", &rma_iov, sizeof(struct fi_rma_iov), mr->dist->iov, rofi->dist->desc.pe_id, rofi->dist->desc.pes);
     if (ret) {
         ERR_MSG("Error exchanging info for memory region alloc buffer. Aborting!");
         return ret;
@@ -890,7 +923,7 @@ int rofi_transport_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr) {
 
 #ifdef _DEBUG
     for (int i = 0; i < rofi->dist->desc.pes; i++) {
-        DEBUG_MSG("\t Node: %d Key: 0x%lx Addr: 0x%lx", i, mr->iov[i].key, mr->iov[i].addr);
+        DEBUG_MSG("\t Node: %d Key: 0x%lx Addr: 0x%lx", i, mr->dist->iov[i].key, mr->dist->iov[i].addr);
     }
 #endif
     return 0;
@@ -909,7 +942,7 @@ int rofi_transport_sub_exchange_mr_info_manual(rofi_transport_t *rofi, rofi_mr_d
     }
     struct fi_rma_iov *sub_alloc_buf = rofi->sub_alloc_buf;
     sub_alloc_buf[me].addr = (uint64_t)mr->start;
-    sub_alloc_buf[me].key = fi_mr_key(mr->fid);
+    sub_alloc_buf[me].key = fi_mr_key(mr->dist->fid);
     DEBUG_MSG("Placing mr info (key: 0x%lx, addr: 0x%lx)....", sub_alloc_buf[me].key, sub_alloc_buf[me].addr);
     uint64_t sub_alloc_barrier_id = 0;
     rofi_transport_inner_barrier(rofi, &sub_alloc_barrier_id, rofi->sub_alloc_barrier_buf, pes, me, num_pes);
@@ -939,7 +972,7 @@ int rofi_transport_sub_exchange_mr_info_manual(rofi_transport_t *rofi, rofi_mr_d
 
     for (int pe = 0; pe < num_pes; pe++) {
         uint64_t actual_pe = pes[pe];
-        mr->iov[actual_pe] = sub_alloc_buf[actual_pe];
+        mr->dist->iov[actual_pe] = sub_alloc_buf[actual_pe];
         DEBUG_MSG("i: %d(pe: %d), addr: 0x%lx, key: 0x%lx  ", pe, actual_pe, sub_alloc_buf[actual_pe].addr, sub_alloc_buf[actual_pe].key);
     }
     rofi_transport_inner_barrier(rofi, &sub_alloc_barrier_id, rofi->sub_alloc_barrier_buf, pes, me, num_pes);
@@ -947,10 +980,11 @@ int rofi_transport_sub_exchange_mr_info_manual(rofi_transport_t *rofi, rofi_mr_d
     return 0;
 }
 
-int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr, uint64_t *pes, uint64_t num_pes) {
+int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr, uint64_t *pes, uint64_t num_pes, int shm) {
     if (rofi->dist->desc.pes == 1) {
         return 0;
     }
+    DEBUG_MSG("dist collective %d", rofi->dist->fi_collective);
     if (!rofi->dist->fi_collective) {
         return rofi_transport_sub_exchange_mr_info_manual(rofi, mr, pes, num_pes);
     }
@@ -964,8 +998,12 @@ int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr
             }
         }
     }
-
-    DEBUG_MSG("Broadcasting MR Info (key: 0x%lx, 0x%lx, addr: 0x%lx) to %d PEs....", mr->mr_key, fi_mr_key(mr->fid), mr->start, num_pes);
+    if (shm) {
+        DEBUG_MSG("Broadcasting MR Info (key: 0x%lx, 0x%lx, addr: 0x%lx) to %d PEs....", mr->shm->mr_key, fi_mr_key(mr->shm->fid), mr->start, num_pes);
+    }
+    else {
+        DEBUG_MSG("Broadcasting MR Info (key: 0x%lx, 0x%lx, addr: 0x%lx) to %d PEs....", mr->dist->mr_key, fi_mr_key(mr->dist->fid), mr->start, num_pes);
+    }
     struct fi_av_set_attr av_set_attr = {0};
     av_set_attr.count = num_pes;
     av_set_attr.start_addr = rofi->dist->remote_addrs[pes[0]];
@@ -1023,8 +1061,14 @@ int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr
 
     struct fi_rma_iov rma_iov;
     rma_iov.addr = (uint64_t)mr->start;
-    rma_iov.key = fi_mr_key(mr->fid);
+    if (shm) {
+        rma_iov.key = fi_mr_key(mr->shm->fid);
+    }
+    else {
+        rma_iov.key = fi_mr_key(mr->dist->fid);
+    }
 
+    DEBUG_MSG("ALLOCATING num_pes: %u * %u of memory for results", num_pes, sizeof(struct fi_rma_iov));
     struct fi_rma_iov *results = malloc(num_pes * sizeof(struct fi_rma_iov));
     if (results == NULL) {
         pthread_mutex_unlock(&rofi->dist->lock);
@@ -1048,9 +1092,20 @@ int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr
         return ret;
     }
 
-    for (int i = 0; i < num_pes; i++) {
-        mr->iov[pes[i]] = results[i];
-        DEBUG_MSG("i: %d(pe: %d), addr: 0x%lx, key: 0x%lx  ", i, pes[i], results[i].addr, results[i].key);
+    if (shm) {
+        for (int i = 0; i < num_pes; i++) {
+
+            // mr->shm->iov[pes[i]] = results[i];
+            mr->shm->iov[i] = results[i];
+            DEBUG_MSG("shm i: %d(pe: %d), addr: 0x%lx, key: 0x%lx  ", i, pes[i], results[i].addr, results[i].key);
+        }
+    }
+    else {
+        for (int i = 0; i < num_pes; i++) {
+
+            mr->dist->iov[pes[i]] = results[i];
+            DEBUG_MSG("i: %d(pe: %d), addr: 0x%lx, key: 0x%lx  ", i, pes[i], results[i].addr, results[i].key);
+        }
     }
     free(results);
     // for now we will immediately close down the collective group as we are currently only using them to do the addr+key transfer
@@ -1102,12 +1157,12 @@ int rofi_transport_inner_barrier(rofi_transport_t *rofi, uint64_t *barrier_id, u
             // the upper level runtime must ensure a given PE is only participating in one allocation at a time
             void *dst = (void *)(&barrier_buf[rofi->dist->desc.pe_id]);
 
-            DEBUG_MSG("%d Sending %d to %d %p - %p + %p", me, *barrier_id, send_pe, dst, rofi->mr->start, rofi->mr->iov[send_pe].addr);
+            DEBUG_MSG("%d Sending %d to %d %p - %p + %p", me, *barrier_id, send_pe, dst, rofi->mr->start, rofi->mr->dist->iov[send_pe].addr);
             struct fi_rma_iov rma_iov;
-            rma_iov.addr = (uint64_t)(dst - rofi->mr->start + rofi->mr->iov[send_pe].addr);
-            rma_iov.key = rofi->mr->iov[send_pe].key;
+            rma_iov.addr = (uint64_t)(dst - rofi->mr->start + rofi->mr->dist->iov[send_pe].addr);
+            rma_iov.key = rofi->mr->dist->iov[send_pe].key;
             DEBUG_MSG("%d Sending %d to %d %p", me, *barrier_id, send_pe, dst);
-            ret = rofi_transport_put(rofi->dist, &rma_iov, send_pe, src, sizeof(uint64_t), rofi->mr->mr_desc, NULL);
+            ret = rofi_transport_put(rofi->dist, &rma_iov, send_pe, src, sizeof(uint64_t), rofi->mr->dist->mr_desc, NULL);
             if (ret) {
                 return ret;
             }

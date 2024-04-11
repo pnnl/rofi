@@ -111,6 +111,9 @@ typedef struct rofi_sub_transport_t {
 } rofi_sub_transport_t;
 
 struct rofi_transport_t {
+    unsigned int pes;
+    unsigned int pe_id;
+    unsigned int num_shm_pes;
     unsigned long status;
     struct rofi_sub_transport_t *dist;
     struct rofi_sub_transport_t *shm;

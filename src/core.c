@@ -25,8 +25,15 @@ void *rofi_get_remote_addr_internal(void *addr, unsigned int id) {
         return NULL;
     }
 
-    DEBUG_MSG("\t Found MR [0x%lx - 0x%lx] Addr: %p Key: 0x%lx ", el->start, el->start + el->size, (void *)(addr - (uintptr_t)el->start + el->iov[id].addr), el->iov[id].key);
-    return (void *)(addr - (uintptr_t)el->start + el->iov[id].addr);
+    if (rofi.shm != NULL && rt_get_node_rank(id) != -1) {
+        int shm_id = rt_get_node_rank(id);
+        DEBUG_MSG("\t Found MR [0x%lx - 0x%lx] Addr: %p Key: 0x%lx ", el->start, el->start + el->size, (void *)(addr - (uintptr_t)el->start + el->shm->iov[id].addr), el->shm->iov[id].key);
+        return (void *)(addr - (uintptr_t)el->start + el->shm->iov[id].addr);
+    }
+    else {
+        DEBUG_MSG("\t Found MR [0x%lx - 0x%lx] Addr: %p Key: 0x%lx ", el->start, el->start + el->size, (void *)(addr - (uintptr_t)el->start + el->dist->iov[id].addr), el->dist->iov[id].key);
+        return (void *)(addr - (uintptr_t)el->start + el->dist->iov[id].addr);
+    }
 }
 
 void *rofi_get_local_addr_from_remote_addr_internal(void *addr, unsigned int id) {
@@ -38,8 +45,15 @@ void *rofi_get_local_addr_from_remote_addr_internal(void *addr, unsigned int id)
         return NULL;
     }
 
-    DEBUG_MSG("\t Found MR [0x%lx - 0x%lx] Addr: %p Key: 0x%lx", el->start, el->start + el->size, (void *)(addr - el->iov[id].addr + (uintptr_t)el->start), el->iov[id].key);
-    return (void *)(addr - el->iov[id].addr + (uintptr_t)el->start);
+    if (rofi.shm != NULL && rt_get_node_rank(id) != -1) {
+        int shm_id = rt_get_node_rank(id);
+        DEBUG_MSG("\t Found MR [0x%lx - 0x%lx] Addr: %p Key: 0x%lx", el->start, el->start + el->size, (void *)(addr - el->shm->iov[id].addr + (uintptr_t)el->start), el->shm->iov[id].key);
+        return (void *)(addr - el->shm->iov[id].addr + (uintptr_t)el->start);
+    }
+    else {
+        DEBUG_MSG("\t Found MR [0x%lx - 0x%lx] Addr: %p Key: 0x%lx", el->start, el->start + el->size, (void *)(addr - el->dist->iov[id].addr + (uintptr_t)el->start), el->dist->iov[id].key);
+        return (void *)(addr - el->dist->iov[id].addr + (uintptr_t)el->start);
+    }
 }
 
 int rofi_wait_internal(void) {
@@ -66,6 +80,21 @@ void *rofi_alloc_internal(size_t size, unsigned long flags) {
         return NULL;
     }
 
+    if (rofi.shm) {
+        uint64_t *shm_pes = calloc(sizeof(uint64_t), rofi.num_shm_pes);
+        for (int i = 0; i < rofi.pes; i++) {
+            int shm_pe = rt_get_node_rank(i);
+            if (shm_pe != -1) {
+                shm_pes[shm_pe] = i;
+            }
+        }
+        if (rofi_transport_sub_exchange_mr_info(&rofi, mr, shm_pes, rofi.num_shm_pes, 1)) {
+            ERR_MSG("Error exchanging shm memory region info. Aborting!");
+            return NULL;
+        }
+        free(shm_pes);
+    }
+
     return mr->start;
 }
 
@@ -76,9 +105,32 @@ void *rofi_sub_alloc_internal(size_t size, unsigned long flags, uint64_t *pes, u
         return NULL;
     }
 
-    if (rofi_transport_sub_exchange_mr_info(&rofi, mr, pes, num_pes)) {
+    if (rofi_transport_sub_exchange_mr_info(&rofi, mr, pes, num_pes, 0)) {
         ERR_MSG("Error exchanging memory region info. Aborting!");
         return NULL;
+    }
+
+    if (rofi.shm) {
+        int num_shm_pes = 0;
+        for (int i = 0; i < num_pes; i++) {
+            if (rt_get_node_rank(pes[i]) != -1) {
+                num_shm_pes++;
+            }
+        }
+        if (num_shm_pes > 0) {
+            uint64_t *shm_pes = calloc(sizeof(uint64_t), rofi.num_shm_pes);
+            for (int i = 0; i < num_pes; i++) {
+                int shm_pe = rt_get_node_rank(pes[i]);
+                if (shm_pe != -1) {
+                    shm_pes[shm_pe] = i;
+                }
+            }
+            if (rofi_transport_sub_exchange_mr_info(&rofi, mr, shm_pes, num_shm_pes, 1)) {
+                ERR_MSG("Error exchanging shm memory region info. Aborting!");
+                return NULL;
+            }
+            free(shm_pes);
+        }
     }
 
     return mr->start;
@@ -128,34 +180,42 @@ int rofi_put_internal(void *dst, void *src, size_t size, unsigned int id, unsign
         ERR_MSG("\t No mr found for address %p on node %u", dst, id);
         return -1;
     }
-    DEBUG_MSG("\t Found MR [0x%p - 0x%p] Key: 0x%lx", el->start, el->start + el->size, el->mr_key);
 
-    rma_iov.addr = (uint64_t)(dst - el->start + el->iov[id].addr);
-    rma_iov.key = el->iov[id].key;
-    if (rma_iov.key == 0) {
-        ERR_MSG("\t No Key found for address %p on node %u", dst, id);
-        return -1;
-    }
-#ifdef _DEBUG
-    if (rofi.shm != NULL && rt_get_node_rank(id) != -1) {
-        DEBUG_MSG("\t SHM: Writing %lu bytes from %p to address 0x%lx at node %u with key 0x%lx (threshold %lu, in-flight msgs: %lu) sync: %d",
-                  size, src, rma_iov.addr, id, rma_iov.key, rofi.shm->desc.inject_size,
-                  rofi.dist->put_cntr,
+    int shm_id = rt_get_node_rank(id);
+
+    if (rofi.shm != NULL && shm_id != -1) {
+        DEBUG_MSG("\t Found MR [0x%p - 0x%p] Shm Key: 0x%lx Dist Key: 0x%lx", el->start, el->start + el->size, el->shm->mr_key, el->dist->mr_key);
+        rma_iov.addr = (uint64_t)(dst - el->start + el->shm->iov[shm_id].addr);
+        rma_iov.key = el->shm->iov[shm_id].key;
+        if (rma_iov.key == 0) {
+            ERR_MSG("\t No Key found for address %p on node %u %d", dst, id, shm_id);
+            return -1;
+        }
+        DEBUG_MSG("\t SHM: Writing %lu bytes from %p to address 0x%lx at shm node %u (%u) with key 0x%lx (threshold %lu, in-flight msgs: %lu) sync: %d",
+                  size, src, rma_iov.addr, shm_id, id, rma_iov.key, rofi.shm->desc.inject_size,
+                  rofi.shm->put_cntr,
                   flags & ROFI_SYNC);
     }
     else {
+        DEBUG_MSG("\t Found MR [0x%p - 0x%p] Key: 0x%lx", el->start, el->start + el->size, el->dist->mr_key);
+
+        rma_iov.addr = (uint64_t)(dst - el->start + el->dist->iov[id].addr);
+        rma_iov.key = el->dist->iov[id].key;
+        if (rma_iov.key == 0) {
+            ERR_MSG("\t No Key found for address %p on node %u", dst, id);
+            return -1;
+        }
         DEBUG_MSG("\t DIST: Writing %lu bytes from %p to address 0x%lx at node %u with key 0x%lx (threshold %lu, in-flight msgs: %lu) sync: %d",
                   size, src, rma_iov.addr, id, rma_iov.key, rofi.dist->desc.inject_size,
                   rofi.dist->put_cntr,
                   flags & ROFI_SYNC);
     }
-#endif
 
     if (flags & ROFI_SYNC) {
-        if (rofi.shm != NULL && rt_get_node_rank(id) != -1) {
-            if (rofi_transport_put(rofi.shm, &rma_iov, rt_get_node_rank(id), src, size, el->mr_desc, NULL)) {
-                ERR_MSG("\t SHM: Error writing %lu bytes from %p to address 0x%lx at node %u with key 0x%lx",
-                        size, src, rma_iov.addr, id, rma_iov.key);
+        if (rofi.shm != NULL && shm_id != -1) {
+            if (rofi_transport_put(rofi.shm, &rma_iov, shm_id, src, size, el->shm->mr_desc, NULL)) {
+                ERR_MSG("\t SHM: Error writing %lu bytes from %p to address 0x%lx at shm node %u (%u) with key 0x%lx",
+                        size, src, rma_iov.addr, shm_id, id, rma_iov.key);
                 return -1;
             }
             if (rofi_transport_put_wait_all(rofi.shm)) {
@@ -164,7 +224,7 @@ int rofi_put_internal(void *dst, void *src, size_t size, unsigned int id, unsign
             }
         }
         else {
-            if (rofi_transport_put(rofi.dist, &rma_iov, id, src, size, el->mr_desc, NULL)) {
+            if (rofi_transport_put(rofi.dist, &rma_iov, id, src, size, el->dist->mr_desc, NULL)) {
                 ERR_MSG("\t DIST: Error writing %lu bytes from %p to address 0x%lx at node %u with key 0x%lx",
                         size, src, rma_iov.addr, id, rma_iov.key);
                 return -1;
@@ -176,15 +236,15 @@ int rofi_put_internal(void *dst, void *src, size_t size, unsigned int id, unsign
         }
     }
     else {
-        if (rofi.shm != NULL && rt_get_node_rank(id) != -1) {
-            if (rofi_transport_put(rofi.shm, &rma_iov, rt_get_node_rank(id), src, size, el->mr_desc, NULL)) {
-                ERR_MSG("\t SHM: Error writing %lu bytes from %p to address 0x%lx at node %u with key 0x%lx",
-                        size, src, rma_iov.addr, id, rma_iov.key);
+        if (rofi.shm != NULL && shm_id != -1) {
+            if (rofi_transport_put(rofi.shm, &rma_iov, shm_id, src, size, el->shm->mr_desc, NULL)) {
+                ERR_MSG("\t SHM: Error writing %lu bytes from %p to address 0x%lx at node %u (%u) with key 0x%lx",
+                        size, src, rma_iov.addr, shm_id, id, rma_iov.key);
                 return -1;
             }
         }
         else {
-            if (rofi_transport_put(rofi.dist, &rma_iov, id, src, size, el->mr_desc, NULL)) {
+            if (rofi_transport_put(rofi.dist, &rma_iov, id, src, size, el->dist->mr_desc, NULL)) {
                 ERR_MSG("\t DIST: Error writing %lu bytes from %p to address 0x%lx at node %u with key 0x%lx",
                         size, src, rma_iov.addr, id, rma_iov.key);
                 return -1;
@@ -205,33 +265,43 @@ int rofi_get_internal(void *dst, void *src, size_t size, unsigned int id, unsign
         ERR_MSG("\t No mr found for address %p on node %u", src, id);
         return -1;
     }
-    DEBUG_MSG("\t Found MR [0x%p - 0x%p] Key: 0x%lx", el->start, el->start + el->size, el->mr_key);
 
-    rma_iov.addr = (uint64_t)(src - el->start + el->iov[id].addr);
-    rma_iov.key = el->iov[id].key;
-    if (rma_iov.key == 0) {
-        ERR_MSG("\t No Key found for address %p on node %u", src, id);
-        return -1;
-    }
+    int shm_id = rt_get_node_rank(id);
 
-#ifdef _DEBUG
-    if (rofi.shm != NULL && rt_get_node_rank(id) != -1) {
+    if (rofi.shm != NULL && shm_id != -1) {
+        DEBUG_MSG("\t Found MR [0x%p - 0x%p] Key: 0x%lx", el->start, el->start + el->size, el->shm->mr_key);
+
+        rma_iov.addr = (uint64_t)(src - el->start + el->shm->iov[id].addr);
+        rma_iov.key = el->shm->iov[id].key;
+        if (rma_iov.key == 0) {
+            ERR_MSG("\t No Key found for address %p on node %u %d", src, id, shm_id);
+            return -1;
+        }
+
         DEBUG_MSG("\t SHM: Reading %lu bytes from address 0x%lx to %p at node %u with key 0x%lx (threshold %lu, in-flight msgs: %lu) sync: %d",
                   size, rma_iov.addr, dst, id, rma_iov.key, rofi.shm->desc.max_message_size,
-                  rofi.dist->get_cntr,
+                  rofi.shm->get_cntr,
                   flags & ROFI_SYNC);
     }
     else {
+        DEBUG_MSG("\t Found MR [0x%p - 0x%p] Key: 0x%lx", el->start, el->start + el->size, el->dist->mr_key);
+
+        rma_iov.addr = (uint64_t)(src - el->start + el->dist->iov[id].addr);
+        rma_iov.key = el->dist->iov[id].key;
+        if (rma_iov.key == 0) {
+            ERR_MSG("\t No Key found for address %p on node %u", src, id);
+            return -1;
+        }
+
         DEBUG_MSG("\t DIST: Reading %lu bytes from address 0x%lx to %p at node %u with key 0x%lx (threshold %lu, in-flight msgs: %lu) sync: %d",
                   size, rma_iov.addr, dst, id, rma_iov.key, rofi.dist->desc.max_message_size,
                   rofi.dist->get_cntr,
                   flags & ROFI_SYNC);
     }
-#endif
 
     if (flags & ROFI_SYNC) {
-        if (rofi.shm != NULL && rt_get_node_rank(id) != -1) {
-            if (rofi_transport_get(rofi.shm, &rma_iov, rt_get_node_rank(id), dst, size, el->mr_desc, NULL)) {
+        if (rofi.shm != NULL && shm_id != -1) {
+            if (rofi_transport_get(rofi.shm, &rma_iov, id, dst, size, el->shm->mr_desc, NULL)) {
                 ERR_MSG("\t SHM: Error reading %lu bytes from address 0x%lx to %p at node %u with key 0x%lx",
                         size, rma_iov.addr, src, id, rma_iov.key);
                 return -1;
@@ -241,7 +311,7 @@ int rofi_get_internal(void *dst, void *src, size_t size, unsigned int id, unsign
             }
         }
         else {
-            if (rofi_transport_get(rofi.dist, &rma_iov, id, dst, size, el->mr_desc, NULL)) {
+            if (rofi_transport_get(rofi.dist, &rma_iov, id, dst, size, el->dist->mr_desc, NULL)) {
                 ERR_MSG("\t DIST: Error reading %lu bytes from address 0x%lx to %p at node %u with key 0x%lx",
                         size, rma_iov.addr, src, id, rma_iov.key);
                 return -1;
@@ -252,15 +322,15 @@ int rofi_get_internal(void *dst, void *src, size_t size, unsigned int id, unsign
         }
     }
     else {
-        if (rofi.shm != NULL && rt_get_node_rank(id) != -1) {
-            if (rofi_transport_get(rofi.shm, &rma_iov, rt_get_node_rank(id), dst, size, el->mr_desc, NULL)) {
+        if (rofi.shm != NULL && shm_id != -1) {
+            if (rofi_transport_get(rofi.shm, &rma_iov, id, dst, size, el->shm->mr_desc, NULL)) {
                 ERR_MSG("\t SHM: Error reading %lu bytes from address 0x%lx to %p at node %u with key 0x%lx",
                         size, rma_iov.addr, src, id, rma_iov.key);
                 return -1;
             }
         }
         else {
-            if (rofi_transport_get(rofi.dist, &rma_iov, id, dst, size, el->mr_desc, NULL)) {
+            if (rofi_transport_get(rofi.dist, &rma_iov, id, dst, size, el->dist->mr_desc, NULL)) {
                 ERR_MSG("\t DIST: Error reading %lu bytes from address 0x%lx to %p at node %u with key 0x%lx",
                         size, rma_iov.addr, src, id, rma_iov.key);
                 return -1;
@@ -338,6 +408,8 @@ int rofi_init_internal(char *provs, char *domains) {
     dist->info = NULL;
     dist->desc.pes = rt_get_size();
     dist->desc.pe_id = rt_get_rank();
+    rofi.pes = rt_get_size();
+    rofi.pe_id = rt_get_rank();
 
     char buffer[256]; // if we have more than 2^256 nodes, something is either seriously wrong or seriously awesome
     snprintf(buffer, sizeof(buffer), "%d", dist->desc.pes);
@@ -383,13 +455,14 @@ int rofi_init_internal(char *provs, char *domains) {
         dist->remote_addrs[i] = i;
     }
 
-    rofi_transport_init(hints, dist, prov_names, domain_names);
+    rofi_transport_init(hints, &rofi, dist, prov_names, domain_names);
     int num_pes_local = 0;
     for (int i = 0; i < dist->desc.pes; i++) {
         if (rt_get_node_rank(i) != -1) {
             num_pes_local++;
         }
     }
+    rofi.num_shm_pes = num_pes_local;
 
     DEBUG_MSG("Num Pes Local=%d", num_pes_local);
     rofi_sub_transport_t *shm = NULL;
@@ -403,8 +476,8 @@ int rofi_init_internal(char *provs, char *domains) {
         pthread_mutex_init(&shm->lock, NULL);
         shm->info = NULL;
         shm->local = 1;
-        shm->desc.pes = dist->desc.pes;     // num_pes_local;
-        shm->desc.pe_id = dist->desc.pe_id; // rt_get_node_rank(dist->desc.pe_id);
+        shm->desc.pes = num_pes_local;                        // dist->desc.pes;     // num_pes_local;
+        shm->desc.pe_id = rt_get_node_rank(dist->desc.pe_id); // dist->desc.pe_id; // rt_get_node_rank(dist->desc.pe_id);
         shm->remote_addrs = (fi_addr_t *)malloc(shm->desc.pes * sizeof(fi_addr_t));
         if (!shm->remote_addrs) {
             ERR_MSG("Error allocating memory for remote addresses. Aborting!");
@@ -415,13 +488,14 @@ int rofi_init_internal(char *provs, char *domains) {
         }
         DEBUG_MSG("Initing Shm");
         rofi_names_t shm_name = {.num = 1, .names = (char *[]){"shm"}};
-        rofi_transport_init(shm_hints, shm, &shm_name, NULL);
+        rofi_transport_init(shm_hints, &rofi, shm, &shm_name, NULL);
     }
 
     if (prov_names) {
         for (int i = 0; i < prov_names->num; i++) {
             free(prov_names->names[i]);
         }
+        free(prov_names->names);
         free(prov_names);
     }
 
@@ -429,6 +503,7 @@ int rofi_init_internal(char *provs, char *domains) {
         for (int i = 0; i < domain_names->num; i++) {
             free(domain_names->names[i]);
         }
+        free(domain_names->names);
         free(domain_names);
     }
 
@@ -463,6 +538,22 @@ int rofi_init_internal(char *provs, char *domains) {
     fi_freeinfo(hints);
     fi_freeinfo(shm_hints);
     rofi_transport_barrier(&rofi);
+
+    if (shm) {
+        DEBUG_MSG("ABOUT TO EXCHANGE SHMEM KEYS");
+        uint64_t *shm_pes = calloc(sizeof(uint64_t), num_pes_local);
+        for (int i = 0; i < dist->desc.pes; i++) {
+            int shm_pe = rt_get_node_rank(i);
+            if (shm_pe != -1) {
+                shm_pes[shm_pe] = i;
+            }
+        }
+        ret = rofi_transport_sub_exchange_mr_info(&rofi, rofi.mr, shm_pes, num_pes_local, 1);
+        if (ret) {
+            return ret;
+        }
+        free(shm_pes);
+    }
 
     DEBUG_MSG("rofi init!!");
     return 0;

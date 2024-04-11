@@ -5,14 +5,19 @@
 #include <pthread.h>
 
 typedef struct {
-    void *start;
-    size_t size;
-    unsigned int mode;
     struct fid_mr *fid;
     struct fi_context2 ctx;
     uint64_t mr_key;
     void *mr_desc;
     struct fi_rma_iov *iov;
+} rofi_mr_inner_desc;
+
+typedef struct {
+    void *start;
+    size_t size;
+    unsigned int mode;
+    rofi_mr_inner_desc* dist;
+    rofi_mr_inner_desc* shm;
     UT_hash_handle hh;
 } rofi_mr_desc; 
 

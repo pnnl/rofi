@@ -214,6 +214,7 @@ int rt_util_decode(const char *inval, void *outval, size_t outvallen) {
 
 int rt_put(char *key, void *value, size_t valuelen) {
     snprintf(kvs_key, max_key_len, "rofi-%lu-%s", (long unsigned)rank, key);
+    DEBUG_MSG("%s val_len: %u", kvs_key, valuelen);
     if (0 != rt_util_encode(value, valuelen, kvs_value,
                             max_val_len)) {
         return 1;
@@ -235,12 +236,13 @@ int rt_put(char *key, void *value, size_t valuelen) {
         }
     }
 
-    DEBUG_MSG("Added (%s,%zu)", key, valuelen);
+    DEBUG_MSG("Added (%s,%s,%zu)", key, kvs_value, valuelen);
     return 0;
 }
 
 int rt_get(int pe, char *key, void *value, size_t valuelen) {
     snprintf(kvs_key, max_key_len, "rofi-%lu-%s", (long unsigned)pe, key);
+    // DEBUG_MSG("%s", kvs_key);
     if (size == 1) {
         singleton_kvs_t *e;
         HASH_FIND_STR(singleton_kvs, kvs_key, e);
@@ -253,6 +255,7 @@ int rt_get(int pe, char *key, void *value, size_t valuelen) {
             return 1;
         }
     }
+    // DEBUG_MSG("trying to get (%s,%s,%zu)", key, kvs_value, valuelen);
     if (0 != rt_util_decode(kvs_value, value, valuelen)) {
         return 2;
     }
@@ -375,7 +378,8 @@ int rt_exchange_data(char *data_name, void *data, size_t size, void *recvbuf, un
     unsigned int i;
     int ret;
 
-    ret = rt_put(data_name, (void *)data, size);
+    DEBUG_MSG("%p %p %p", data_name, data, recvbuf);
+    ret = rt_put(data_name, data, size);
     if (ret) {
         ERR_MSG("Failed during hostname store to KVS: (%d)", ret);
         return ret;

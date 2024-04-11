@@ -58,10 +58,10 @@
      _a < _b ? _a : _b; })
 
 int rofi_transport_fini(rofi_sub_transport_t *trans);
-int rofi_transport_init(struct fi_info *hints, rofi_sub_transport_t *trans, rofi_names_t *prov_names, rofi_names_t *domain_names);
+int rofi_transport_init(struct fi_info *hints, rofi_transport_t *rofi, rofi_sub_transport_t *trans, rofi_names_t *prov_names, rofi_names_t *domain_names);
 int rofi_transport_init_fabric_resources(rofi_sub_transport_t *trans);
 int rofi_transport_init_endpoint_resources(rofi_sub_transport_t *trans);
-int rofi_transport_init_av(rofi_sub_transport_t *trans);
+int rofi_transport_init_av(rofi_transport_t *rofi, rofi_sub_transport_t *trans);
 
 int rofi_transport_progress(rofi_sub_transport_t *trans);
 int rofi_transport_ctx_check_err(rofi_sub_transport_t *trans, int err);
@@ -84,7 +84,7 @@ int rofi_transport_send(rofi_sub_transport_t *trans, void *buf, size_t len, uint
 int rofi_transport_recv(rofi_sub_transport_t *trans, void *buf, size_t len);
 
 int rofi_transport_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr);
-int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr, uint64_t *pes, uint64_t num_pes);
+int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr, uint64_t *pes, uint64_t num_pes, int shm);
 int rofi_transport_inner_barrier(rofi_transport_t *rofi, uint64_t *barrier_id, uint64_t *barrier_buf, uint64_t *pes, uint64_t me, uint64_t num_pes);
 int rofi_transport_barrier(rofi_transport_t *rofi);
 
