@@ -53,6 +53,7 @@
 #include "transport.h"
 
 int rofi_transport_fini(rofi_sub_transport_t *trans) {
+    timer_start(trans->timer,0,"rofi_transport_fini");
     DEBUG_MSG("Fini");
 
     int ret = fi_close(&trans->ep->fid);
@@ -130,6 +131,7 @@ int rofi_transport_fini(rofi_sub_transport_t *trans) {
 }
 
 void rofi_transport_select_provider(struct fi_info *prov, rofi_sub_transport_t *trans, rofi_names_t *names) {
+    timer_start(trans->timer,1,"rofi_transport_select_provider");
     struct fi_info *prov_cur = prov;
     if (names == NULL) {
         trans->info = fi_dupinfo(prov_cur);
@@ -189,6 +191,7 @@ void rofi_transport_select_provider(struct fi_info *prov, rofi_sub_transport_t *
 }
 
 void rofi_transport_find_provider(struct fi_info *hints, rofi_sub_transport_t *trans, rofi_names_t *prov_names, rofi_names_t *domain_names) {
+    timer_start(trans->timer,2,"rofi_transport_find_provider");
     DEBUG_MSG("fi_getinfo");
     struct fi_info *prov = fi_allocinfo();
     int ret = fi_getinfo(ROFI_FI_VERSION, NULL, NULL, 0, hints, &prov);
@@ -243,6 +246,7 @@ void rofi_transport_find_provider(struct fi_info *hints, rofi_sub_transport_t *t
 }
 
 int rofi_transport_init(struct fi_info *hints, rofi_transport_t *rofi, rofi_sub_transport_t *trans, rofi_names_t *prov_names, rofi_names_t *domain_names) {
+    timer_start(trans->timer,3,"rofi_transport_init");
     rofi_transport_find_provider(hints, trans, prov_names, domain_names);
     if (trans->info == NULL) {
         hints->caps = hints->caps ^ FI_COLLECTIVE; // try without collective
@@ -318,6 +322,7 @@ int rofi_transport_init(struct fi_info *hints, rofi_transport_t *rofi, rofi_sub_
 }
 
 int rofi_transport_init_fabric_resources(rofi_sub_transport_t *trans) {
+    timer_start(trans->timer,4,"rofi_transport_init_fabric_resources");
     DEBUG_MSG("FI_FABRIC");
     int ret = fi_fabric(trans->info->fabric_attr, &trans->fabric, NULL);
     if (ret) {
@@ -344,6 +349,7 @@ int rofi_transport_init_fabric_resources(rofi_sub_transport_t *trans) {
     return 0;
 }
 int rofi_transport_init_endpoint_resources(rofi_sub_transport_t *trans) {
+    timer_start(trans->timer,5,"rofi_transport_init_endpoint_resources");
     struct fi_cntr_attr put_cntr_attr = {0};
     struct fi_cntr_attr get_cntr_attr = {0};
     struct fi_cntr_attr send_cntr_attr = {0};
@@ -492,6 +498,7 @@ int rofi_transport_init_endpoint_resources(rofi_sub_transport_t *trans) {
 }
 
 int rofi_transport_init_av(rofi_transport_t *rofi, rofi_sub_transport_t *trans) {
+    timer_start(trans->timer,6,"rofi_transport_init_av");
     int max_addr_len = trans->desc.addrlen + 16;
     char *all_addrs = (char *)malloc(trans->desc.pes * max_addr_len);
 
@@ -548,6 +555,7 @@ int rofi_transport_init_av(rofi_transport_t *rofi, rofi_sub_transport_t *trans) 
 // this shouldn't return any completions, as thc cq should
 // only handle error events now
 int rofi_transport_progress(rofi_sub_transport_t *trans) {
+    timer_start(trans->timer,7,"rofi_transport_progress");
     struct fi_cq_entry buf = {0};
     int ret = fi_cq_read(trans->cq, &buf, 1);
     if (ret == 1) {
@@ -575,6 +583,7 @@ int rofi_transport_progress(rofi_sub_transport_t *trans) {
 // checks the rma return status, and aborts if not -FI_EAGAIN
 // note this does not try to make progress
 int rofi_transport_locked_ctx_check_err(rofi_sub_transport_t *trans, int err) {
+    timer_start(trans->timer,8,"rofi_transport_locked_ctx_check_err");
     if (err == -FI_EAGAIN) {
         struct fi_cq_err_entry ebuf = {0};
         int ret = fi_cq_readerr(trans->cq, (void *)&ebuf, 0);
@@ -598,6 +607,7 @@ int rofi_transport_locked_ctx_check_err(rofi_sub_transport_t *trans, int err) {
 // checks the rma return status, and aborts if not -FI_EAGAIN
 // note this does not try to make progress
 int rofi_transport_ctx_check_err(rofi_sub_transport_t *trans, int err) {
+    timer_start(trans->timer,9,"rofi_transport_ctx_check_err");
     if (err == -FI_EAGAIN) {
         struct fi_cq_err_entry ebuf = {0};
         pthread_mutex_lock(&trans->lock);
@@ -623,6 +633,7 @@ int rofi_transport_ctx_check_err(rofi_sub_transport_t *trans, int err) {
 // checks the rma return status, and aborts if not -FI_EAGAIN
 // otherwise tries to make progress
 int rofi_transport_check_rma_err(rofi_sub_transport_t *trans, int err) {
+    timer_start(trans->timer,10,"rofi_transport_check_rma_err");
     if (err == -FI_EAGAIN) {
         struct fi_cq_err_entry ebuf = {0};
         int ret = fi_cq_readerr(trans->cq, (void *)&ebuf, 0);
@@ -648,6 +659,7 @@ int rofi_transport_check_rma_err(rofi_sub_transport_t *trans, int err) {
 }
 
 int rofi_transport_locked_wait_on_cntr(rofi_sub_transport_t *trans, uint64_t *pending_cntr, struct fid_cntr *cntr) {
+    timer_start(trans->timer,11,"rofi_transport_locked_wait_on_cntr");
     uint64_t cnt = *pending_cntr;
     uint64_t prev_cnt = cnt;
     uint64_t cur_cnt = fi_cntr_read(cntr);
@@ -673,6 +685,7 @@ int rofi_transport_locked_wait_on_cntr(rofi_sub_transport_t *trans, uint64_t *pe
 }
 
 int rofi_transport_wait_on_cntr(rofi_sub_transport_t *trans, uint64_t *pending_cntr, struct fid_cntr *cntr) {
+    timer_start(trans->timer,12,"rofi_transport_wait_on_cntr");
     uint64_t cnt = *pending_cntr;
     uint64_t prev_cnt = cnt;
     pthread_mutex_lock(&trans->lock);
@@ -701,6 +714,7 @@ int rofi_transport_wait_on_cntr(rofi_sub_transport_t *trans, uint64_t *pending_c
 }
 
 int rofi_transport_wait_on_event(rofi_sub_transport_t *trans, uint32_t event, void *context) {
+    timer_start(trans->timer,13,"rofi_transport_wait_on_event");
     uint32_t ev;
     struct fi_eq_entry entry;
 
@@ -728,6 +742,7 @@ int rofi_transport_wait_on_event(rofi_sub_transport_t *trans, uint32_t event, vo
 }
 
 int rofi_transport_wait_on_context_comp(rofi_sub_transport_t *trans, void *context) {
+    timer_start(trans->timer,14,"rofi_transport_wait_on_context_comp");
     struct fi_cq_entry buf = {0};
     struct fi_cq_err_entry err_entry = {0};
 
@@ -749,6 +764,7 @@ int rofi_transport_wait_on_context_comp(rofi_sub_transport_t *trans, void *conte
 }
 
 int rofi_transport_put_inject(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, fi_addr_t pe, const void *src_addr, size_t len) {
+    timer_start(trans->timer,15,"rofi_transport_put_inject");
     pthread_mutex_lock(&trans->lock);
     trans->pending_put_cntr += 1;
     // if (pe == 3 && rma_iov->key == 2) {
@@ -770,7 +786,7 @@ int rofi_transport_put_inject(rofi_sub_transport_t *trans, struct fi_rma_iov *rm
 }
 
 int rofi_transport_put_large(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, fi_addr_t pe, const void *src_addr, size_t len, void *desc, void *context) {
-
+    timer_start(trans->timer,16,"rofi_transport_put_large");
     uint8_t *src_cur_addr = (uint8_t *)src_addr;
     uint8_t *src_end_addr = src_cur_addr + len;
     uint64_t dst_cur_addr = (uint64_t)rma_iov->addr;
@@ -799,6 +815,7 @@ int rofi_transport_put_large(rofi_sub_transport_t *trans, struct fi_rma_iov *rma
 
 // for PE need to check if using FI_AV_MAP, and then index into that
 int rofi_transport_put(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, uint64_t pe, const void *src_addr, size_t len, void *desc, void *context) {
+    timer_start(trans->timer,17,"rofi_transport_put");
     if (len < trans->desc.inject_size) {
         return rofi_transport_put_inject(trans, rma_iov, trans->remote_addrs[pe], src_addr, len);
     }
@@ -808,11 +825,12 @@ int rofi_transport_put(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, 
 }
 
 int rofi_transport_put_wait_all(rofi_sub_transport_t *trans) {
+    timer_start(trans->timer,18,"rofi_transport_put_wait_all");
     return rofi_transport_wait_on_cntr(trans, &trans->pending_put_cntr, trans->put_cntr);
 }
 
 int rofi_transport_get_small(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, uint64_t pe, void *dst_addr, size_t len, void *desc, void *context) {
-
+    timer_start(trans->timer,19,"rofi_transport_get_small");
     pthread_mutex_lock(&trans->lock);
     trans->pending_get_cntr += 1;
     int ret = fi_read(trans->ep, dst_addr, len, desc, pe, rma_iov->addr, rma_iov->key, context);
@@ -828,6 +846,7 @@ int rofi_transport_get_small(rofi_sub_transport_t *trans, struct fi_rma_iov *rma
 }
 
 int rofi_transport_get_large(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, uint64_t pe, void *dst_addr, size_t len, void *desc, void *context) {
+    timer_start(trans->timer,20,"rofi_transport_get_large");
     uint64_t src_cur_addr = (uint64_t)rma_iov->addr;
 
     uint8_t *dst_cur_addr = (uint8_t *)dst_addr;
@@ -854,6 +873,7 @@ int rofi_transport_get_large(rofi_sub_transport_t *trans, struct fi_rma_iov *rma
 }
 
 int rofi_transport_get(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, uint64_t pe, void *dst_addr, size_t len, void *desc, void *context) {
+    timer_start(trans->timer,21,"rofi_transport_get");
     if (len < trans->desc.max_message_size) {
         return rofi_transport_get_small(trans, rma_iov, trans->remote_addrs[pe], dst_addr, len, desc, context);
     }
@@ -863,10 +883,12 @@ int rofi_transport_get(rofi_sub_transport_t *trans, struct fi_rma_iov *rma_iov, 
 }
 
 int rofi_transport_get_wait_all(rofi_sub_transport_t *trans) {
+    timer_start(trans->timer,22,"rofi_transport_get_wait_all");
     return rofi_transport_wait_on_cntr(trans, &trans->pending_get_cntr, trans->get_cntr);
 }
 
 int rofi_transport_send(rofi_sub_transport_t *trans, void *buf, size_t len, uint64_t pe) {
+    timer_start(trans->timer,23,"rofi_transport_send");
     pthread_mutex_lock(&trans->lock);
     uint64_t finish_flag = 0;
     trans->pending_send_cntr += 1;
@@ -887,6 +909,7 @@ int rofi_transport_send(rofi_sub_transport_t *trans, void *buf, size_t len, uint
 
 // we actually need to make this async, so store the finish flag in a hashmap, that we can use to check on subsequent calls
 int rofi_transport_recv(rofi_sub_transport_t *trans, void *buf, size_t len) {
+    timer_start(trans->timer,24,"rofi_transport_recv");
     pthread_mutex_lock(&trans->lock);
     uint64_t finish_flag = 0;
     trans->pending_recv_cntr += 1;
@@ -906,6 +929,7 @@ int rofi_transport_recv(rofi_sub_transport_t *trans, void *buf, size_t len) {
 }
 
 int rofi_transport_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr) {
+    timer_start(rofi->dist->timer,25,"rofi_transport_exchange_mr_info");
     if (rofi->dist->desc.pes == 1) {
         return 0;
     }
@@ -931,6 +955,7 @@ int rofi_transport_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr) {
 
 // for use when FI_COLLECTIVE not available
 int rofi_transport_sub_exchange_mr_info_manual(rofi_transport_t *rofi, rofi_mr_desc *mr, uint64_t *pes, uint64_t num_pes) {
+    timer_start(rofi->dist->timer,26,"rofi_transport_sub_exchange_mr_info_manual");
     int me = rofi->dist->desc.pe_id;
     if (pes != NULL) { // doing sub barrier, figure out team pe id
         for (int i = 0; i < num_pes; i++) {
@@ -981,11 +1006,14 @@ int rofi_transport_sub_exchange_mr_info_manual(rofi_transport_t *rofi, rofi_mr_d
 }
 
 int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr, uint64_t *pes, uint64_t num_pes, int shm) {
+    timer_start(rofi->dist->timer,27,"rofi_transport_sub_exchange_mr_info");
     if (rofi->dist->desc.pes == 1) {
+        timer_end(trans->timer,27);
         return 0;
     }
     DEBUG_MSG("dist collective %d", rofi->dist->fi_collective);
     if (!rofi->dist->fi_collective) {
+        timer_end(trans->timer,27);
         return rofi_transport_sub_exchange_mr_info_manual(rofi, mr, pes, num_pes);
     }
 
@@ -1019,6 +1047,7 @@ int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr
     if (ret) {
         ROFI_TRANSPORT_ERR_MSG("fi_av_st", ret);
         pthread_mutex_unlock(&rofi->dist->lock);
+        timer_end(trans->timer,27);
         return ret;
     }
     DEBUG_MSG("CREATED AV_SET: 0x%p", av_set);
@@ -1028,6 +1057,7 @@ int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr
         if (ret) {
             ROFI_TRANSPORT_ERR_MSG("fi_av_set_insert", ret);
             pthread_mutex_unlock(&rofi->dist->lock);
+            timer_end(trans->timer,27);
             return ret;
         }
         DEBUG_MSG("Inserted PE %d into AV_SET: 0x%p", pes[i], av_set);
@@ -1037,6 +1067,7 @@ int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr
     if (ret) {
         ROFI_TRANSPORT_ERR_MSG("fi_av_set_addr", ret);
         pthread_mutex_unlock(&rofi->dist->lock);
+        timer_end(trans->timer,27);
         return ret;
     }
 
@@ -1048,6 +1079,7 @@ int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr
     if (ret) {
         ROFI_TRANSPORT_ERR_MSG("fi_join_collective", ret);
         pthread_mutex_unlock(&rofi->dist->lock);
+        timer_end(trans->timer,27);
         return ret;
     }
     DEBUG_MSG("Initiated collective join...");
@@ -1055,6 +1087,7 @@ int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr
     if (ret) {
         ROFI_TRANSPORT_ERR_MSG("rofi_transport_wait_on_event", ret);
         pthread_mutex_unlock(&rofi->dist->lock);
+        timer_end(trans->timer,27);
         return ret;
     }
     DEBUG_MSG("Joined collective");
@@ -1073,6 +1106,7 @@ int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr
     if (results == NULL) {
         pthread_mutex_unlock(&rofi->dist->lock);
         ERR_MSG("malloc failed");
+        timer_end(trans->timer,27);
         return -1;
     }
 
@@ -1082,6 +1116,7 @@ int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr
         ROFI_TRANSPORT_ERR_MSG("fi_allgather", ret);
         pthread_mutex_unlock(&rofi->dist->lock);
         free(results);
+        timer_end(trans->timer,27);
         return ret;
     }
     ret = rofi_transport_wait_on_context_comp(rofi->dist, &done_flag);
@@ -1089,6 +1124,7 @@ int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr
         ROFI_TRANSPORT_ERR_MSG("rofi_transport_wait_on_event", ret);
         pthread_mutex_unlock(&rofi->dist->lock);
         free(results);
+        timer_end(trans->timer,27);
         return ret;
     }
 
@@ -1129,6 +1165,7 @@ int rofi_transport_sub_exchange_mr_info(rofi_transport_t *rofi, rofi_mr_desc *mr
     }
 
     pthread_mutex_unlock(&rofi->dist->lock);
+    timer_end(trans->timer,27);
     return ret;
 }
 
@@ -1139,6 +1176,7 @@ int euclid_rem(int a, int b) {
 
 // This can support sub barriers
 int rofi_transport_inner_barrier(rofi_transport_t *rofi, uint64_t *barrier_id, uint64_t *barrier_buf, uint64_t *pes, uint64_t me, uint64_t num_pes) {
+    timer_start(trans->timer,28,"rofi_transport_inner_barrier");
     int n = 2;
 
     int num_rounds = ceil(log2((double)num_pes) / log2((double)n));
@@ -1164,6 +1202,7 @@ int rofi_transport_inner_barrier(rofi_transport_t *rofi, uint64_t *barrier_id, u
             DEBUG_MSG("%d Sending %d to %d %p", me, *barrier_id, send_pe, dst);
             ret = rofi_transport_put(rofi->dist, &rma_iov, send_pe, src, sizeof(uint64_t), rofi->mr->dist->mr_desc, NULL);
             if (ret) {
+                timer_end(trans->timer,28);
                 return ret;
             }
         }
@@ -1176,6 +1215,7 @@ int rofi_transport_inner_barrier(rofi_transport_t *rofi, uint64_t *barrier_id, u
                 pthread_mutex_lock(&rofi->dist->lock);
                 ret = rofi_transport_progress(rofi->dist);
                 if (ret) {
+                    timer_end(trans->timer,28);
                     return ret;
                 }
                 pthread_mutex_unlock(&rofi->dist->lock);
@@ -1183,9 +1223,12 @@ int rofi_transport_inner_barrier(rofi_transport_t *rofi, uint64_t *barrier_id, u
             }
         }
     }
+    timer_end(trans->timer,28);
     return 0;
 }
 
 int rofi_transport_barrier(rofi_transport_t *rofi) {
+    timer_start(trans->timer,29,"rofi_transport_barrier");
+    timer_end(trans->timer,29);
     return rofi_transport_inner_barrier(rofi, &rofi->global_barrier_id, rofi->global_barrier_buf, NULL, rofi->dist->desc.pe_id, rofi->dist->desc.pes);
 }

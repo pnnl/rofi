@@ -13,6 +13,7 @@
 #include <rofi_debug.h>
 #include <rofi_internal.h>
 #include <transport.h>
+#include <timer.h>
 
 rofi_transport_t rofi;
 
@@ -386,6 +387,7 @@ rofi_names_t *rofi_parse_names_internal(char *names_list) {
 }
 
 int rofi_init_internal(char *provs, char *domains) {
+    init_timer(&rofi_timer, 100);
     pthread_rwlock_init(&rofi.mr_lock, NULL);
 
     int ret = 0;
