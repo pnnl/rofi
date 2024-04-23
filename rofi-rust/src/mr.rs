@@ -3,23 +3,25 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::vec::Vec;
 use crate::transport;
-use libfabric::mr::{MemoryRegion, MemoryRegionDesc};
-
+use libfabric::infocapsoptions::Caps;
+use libfabric::mr::{MemoryRegion, MemoryRegionDesc, MrKey};
+use libfabric::iovec::RmaIoVec;
+use libfabric::info::InfoEntry;
 extern crate memmap;
 
 pub struct MappedMemoryRegion { // [TODO] Make Drop remove this from the rofi memory table
     mem: Rc<RefCell<memmap::MmapMut>>,
     mr: libfabric::mr::MemoryRegion,
     desc: libfabric::mr::MemoryRegionDesc,
-    key: u64,
-    iovs: OnceCell<Vec<libfabric::RmaIoVec>>,
+    key: MrKey,
+    iovs: OnceCell<Vec<RmaIoVec>>,
     range: std::ops::Range<usize>,
     pes_map: OnceCell<HashMap<usize, usize>>,
 }
 
 impl MappedMemoryRegion {
 
-    pub(crate) fn new(mem: memmap::MmapMut, mr: libfabric::mr::MemoryRegion, desc: libfabric::mr::MemoryRegionDesc, key: u64) -> Self {
+    pub(crate) fn new(mem: memmap::MmapMut, mr: libfabric::mr::MemoryRegion, desc: libfabric::mr::MemoryRegionDesc, key: MrKey) -> Self {
         let start =  mem.as_ptr() as usize;
         let end =   mem.last().unwrap() as *const u8 as usize;
 
@@ -45,12 +47,12 @@ impl MappedMemoryRegion {
         self.iovs.get().unwrap()[id].get_address() as usize
     }
 
-    pub(crate) fn set_iovs(&self, iovs: Vec<libfabric::RmaIoVec>) {
+    pub(crate) fn set_iovs(&self, iovs: Vec<RmaIoVec>) {
         self.iovs.set(iovs).unwrap();
         self.pes_map.set(HashMap::new()).unwrap();
     }
 
-    pub(crate) fn set_sub_iovs(&self, iovs: Vec<libfabric::RmaIoVec>, pes: &[usize]) {
+    pub(crate) fn set_sub_iovs(&self, iovs: Vec<RmaIoVec>, pes: &[usize]) {
         self.iovs.set(iovs).expect("Could not set iovs");
         
         let mut id_to_iov_map = HashMap::new();
@@ -76,15 +78,16 @@ impl MappedMemoryRegion {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn get_key(&self) -> u64 {
+    pub(crate) fn get_key(&self) -> &MrKey {
         
-        self.key
+        &self.key
     }
 
-    pub(crate) fn get_remote_key(&self, remote_id: usize) -> u64 {
+    pub(crate) fn get_remote_key(&self, remote_id: usize) -> MrKey { // Should be mapped key
         
         let id = self.get_real_id(remote_id);
-        self.iovs.get().unwrap()[id].get_key()
+        unsafe{MrKey::from_u64(self.iovs.get().unwrap()[id].get_key())}
+
     }
 
     pub(crate) fn contains(&self, addr: usize) -> bool {
@@ -159,7 +162,7 @@ impl MemoryRegionManager {
         }
     }
 
-    pub(crate) fn alloc(&mut self, info: &libfabric::InfoEntry, domain: &libfabric::domain::Domain, ep: &libfabric::ep::Endpoint, size: usize) ->  Rc<MappedMemoryRegion> {
+    pub(crate) fn alloc<I: Caps>(&mut self, info: &InfoEntry<I>, domain: &libfabric::domain::Domain, ep: &libfabric::ep::Endpoint<I>, size: usize) ->  Rc<MappedMemoryRegion> {
         let mem_size = if (page_size::get() - 1) & size != 0 { (size + page_size::get()) & !(page_size::get()-1) } else { size}; 
 
         let mut mem = memmap::MmapOptions::new().len(mem_size).map_anon().unwrap();

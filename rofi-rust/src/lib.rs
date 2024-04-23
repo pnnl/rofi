@@ -2,18 +2,20 @@ mod pmi;
 mod mr;
 mod context;
 mod transport;
-mod async_rofi;
+// mod async_rofi;
 use std::cell::RefCell;
 use std::rc::Rc;
 use mr::{MappedMemoryRegion, MemoryRegionManager};
 use debug_print::debug_println;
 use context::ContextBank;
-use libfabric::{av::AddressVector, cntr::Counter, cq::CompletionQueue, domain::Domain, enums::MrMode, ep::{Endpoint, EndpointAttr}, eq::{EventQueue, EventQueueAttr}, error::Error, fabric::Fabric, mr::MemoryRegionDesc, Address, CollectiveAttr, Info, InfoEntry, RmaIoVec, FID};
-
+use libfabric::{av::{AddressVector, AddressVectorSetBuilder}, cntr::Counter, cq::{CompletionQueue, Completion}, domain::{Domain, DomainBuilder}, enums::MrMode, ep::{Endpoint, EndpointAttr, self}, eq::{EventQueue, EventQueueBuilder}, error::Error, fabric::{Fabric, FabricBuilder}, mr::{MemoryRegionDesc, MrKey}, infocapsoptions::{InfoCaps, Caps, CollCap}, info::{InfoHints, Info, InfoEntry}, cntroptions::CntrConfig, eqoptions::EqConfig, cqoptions::CqConfig, MappedAddress, Waitable};
+// use libfabric::ep::Address;
+use libfabric::infocapsoptions::RmaDefaultCap;
+use libfabric::{RMA, COLL, ATOMIC};
 // Encapsulates data for the Tx/Rx operations
-struct XxData {
-    cq: CompletionQueue,
-    cntr: Counter,
+struct XxData<CQ: CqConfig , CNTR: CntrConfig> {
+    cq: CompletionQueue<CQ>,
+    cntr: Counter<CNTR>,
     cq_cntr: u64,
     cq_seq: u64,
 }
@@ -21,7 +23,7 @@ struct XxData {
 struct CommWorld {
     nnodes: usize,
     my_id : usize,
-    addresses: Vec<Address>
+    addresses: Vec<Option<MappedAddress>>
 }
 
 pub enum RmaOp {
@@ -29,28 +31,33 @@ pub enum RmaOp {
     RmaWriteData,
     RmaRead,
 }
+pub type EpRmaAtomicCol = libfabric::caps_type!(RMA, COLL, ATOMIC);
+pub type EqOptDefault =  libfabric::eqoptions::Options<libfabric::eqoptions::Off, libfabric::eqoptions::WaitNoRetrieve, libfabric::eqoptions::Off>;
+pub type CqOptDefault =  libfabric::cqoptions::Options<libfabric::cqoptions::WaitNoRetrieve, libfabric::cqoptions::Off>;
+pub type CntrOptDefault = libfabric::cntroptions::Options<libfabric::cntroptions::WaitNoRetrieve, libfabric::cntroptions::Off>;
 
 #[allow(dead_code)]
-pub struct Rofi {                       // Note that the order in which libfabric structs are defined matters 
+pub struct Rofi<I: Caps, EQ: EqConfig, CQ: CqConfig , CNTR: CntrConfig> {                       // Note that the order in which libfabric structs are defined matters 
                                         // e.g. fabric has to be dropped after domain, so we define it after
     world: CommWorld,
     pmi: Box<dyn crate::pmi::PmiTrait>,
     pub(crate) mr_manager: Rc<RefCell<MemoryRegionManager>>,
     barrier_mr: Rc<MappedMemoryRegion>,
-    ep: Endpoint,
-    eq: EventQueue,
-    tx: XxData,
-    rx: XxData,
+    ep: Endpoint<I>,
+    eq: EventQueue<EQ>,
+    tx: XxData<CQ, CNTR>,
+    rx: XxData<CQ, CNTR>,
     av: AddressVector,
     domain: Domain,
     fabric: Fabric,
-    pub(crate) info: InfoEntry,
-    all_info: Info,
+    pub(crate) info: InfoEntry<I>,
+    all_info: Info<I>,
     mr_next_key: u64,
     ctx_bank: RefCell<ContextBank>,
     barrier_id: usize,
     // transport_mtx: std::sync::Mutex<()>,
 }
+
 
 pub struct RofiBuilder {
     pmi: Box<dyn crate::pmi::PmiTrait>,
@@ -116,6 +123,7 @@ impl RofiBuilder {
         }
     }
 
+
     /// Instatiate a Rofi object
     /// 
     /// # Collective Operation
@@ -128,60 +136,57 @@ impl RofiBuilder {
     ///
     /// let rofi_builder = RofiBuilder::with_pmi1.build()
     /// ```
-    pub fn build(self) -> Result<Rofi, libfabric::error::Error> {
-        
-        Rofi::init(self.pmi)
-    }
-}
+    pub fn build(mut self) -> Result<Rofi<EpRmaAtomicCol, EqOptDefault, CqOptDefault, CntrOptDefault>, libfabric::error::Error> {
 
-impl Rofi {
-
-    pub(crate) fn init(mut pmi: Box<dyn crate::pmi::PmiTrait>) -> Result<Rofi, libfabric::error::Error> {
-
-        let caps = libfabric::InfoCaps::new().rma().atomic().collective();
-        let hints = libfabric::InfoHints::new()
+        let caps = InfoCaps::new().rma().atomic().collective();
+        let hints = InfoHints::new()
             .caps(caps)
             .domain_attr(
                 libfabric::domain::DomainAttr::new()
-                    .resource_mgmt(libfabric::enums::ResourceMgmt::ENABLED)
-                    .threading(libfabric::enums::Threading::DOMAIN)
+                    .resource_mgmt(libfabric::enums::ResourceMgmt::Enabled)
+                    .threading(libfabric::enums::Threading::Domain)
                     .mr_mode(MrMode::new().allocated().prov_key().virt_addr())
-                    .data_progress(libfabric::enums::Progress::MANUAL)
+                    .data_progress(libfabric::enums::Progress::Manual).clone()
                 )
             .mode(libfabric::enums::Mode::new().context())
-            .ep_attr(EndpointAttr::new().ep_type(libfabric::enums::EndpointType::RDM));
+            .ep_attr(EndpointAttr::new().ep_type(libfabric::enums::EndpointType::Rdm).clone());
+        
+
     
-        let all_info = libfabric::Info::new().hints(&hints).request().unwrap();
+        let all_info = Info::new().hints(&hints).request()?;
         let entries = all_info.get();
         let info = entries[0].clone();
-        let fabric = Fabric::new(info.get_fabric_attr().clone()).unwrap();
-        let eq: EventQueue = fabric.eq_open(EventQueueAttr::new()).unwrap();
-        let domain = fabric.domain(&info)?;
-        domain.query_collective(libfabric::enums::CollectiveOp::ALLGATHER, CollectiveAttr::new(), 0).unwrap();
+        let fabric = FabricBuilder::new(&info).build()?;
+            
+        let eq = EventQueueBuilder::new(&fabric).build()?;
+        let domain = DomainBuilder::new(&fabric, &info).build()?;
+        domain.query_collective::<i32>(libfabric::enums::CollectiveOp::AllGather, libfabric::comm::collective::CollectiveAttr::new())?;
         let (tx_cq, rx_cq, tx_cntr, rx_cntr, av, ep) = transport::init_ep_resources(&info, &domain, &eq).unwrap();
 
-        let mut addresses: Vec<Address> =  vec![u64::MAX; pmi.get_size()];
-        let mut addr  = vec![0_u8; 16];
+        // let mut addresses: Vec<Address> =  vec![u64::MAX; pmi.get_size()];
+        // let mut addr  = vec![0_u8; 16];
 
-        let len = ep.getname(&mut addr)?;
+        ep.getname()?;
+        let address = ep.getname().unwrap();
+        let address_bytes = address.as_bytes();
 
-        pmi.put("epname", &addr[0..len]).unwrap();
-        pmi.exchange().unwrap();
-        let mut all_addresses: Vec<u8> = vec![0 ; len * pmi.get_size()];
-        for i in 0..pmi.get_size() {
-            let res = pmi.get(i, "epname", len).unwrap();
-            all_addresses[i* len..(i+1)*len].copy_from_slice(&res);
+        self.pmi.put("epname", address_bytes).unwrap();
+        self.pmi.exchange().unwrap();
+        let mut all_addresses = Vec::new();
+        for i in 0..self.pmi.get_size() {
+            let res = self.pmi.get(i, "epname", address_bytes.len()).unwrap();
+            let address = unsafe{ep::Address::from_bytes(&res)};
+            all_addresses.push(address);
         }
 
-        av.insert(&all_addresses, &mut addresses, 0).unwrap();
+        let addresses = av.insert(&all_addresses, 0).unwrap();
 
         let mr_manager = Rc::new(RefCell::new(MemoryRegionManager::new()));
-        let barrier_size = pmi.get_size() * std::mem::size_of::<usize>();
+        let barrier_size = self.pmi.get_size() * std::mem::size_of::<usize>();
         let barrier_mr = mr_manager.borrow_mut().alloc(&info, &domain, &ep, barrier_size);
-        
         let mut rofi = Rofi {
-            world: CommWorld{ nnodes: pmi.get_size(), my_id: pmi.get_rank(), addresses},
-            pmi,
+            world: CommWorld{ nnodes: self.pmi.get_size(), my_id: self.pmi.get_rank(), addresses},
+            pmi: self.pmi,
             all_info,
             info,
             fabric,
@@ -198,16 +203,42 @@ impl Rofi {
             mr_manager,
             // transport_mtx: std::sync::Mutex::new(()),
         };
+
         let key = rofi.barrier_mr.get_key();
         let mr = rofi.barrier_mr.get_mem().borrow().as_ptr() as u64;
-        
-        let remote_iovs = rofi.exchange_mr_info(mr, key);
+        let remote_iovs = match key {
+            MrKey::Key(key) => {
+            rofi.exchange_mr_info(mr, *key)
+                }
+                _ => todo!()
+        };
         rofi.barrier_mr.set_iovs(remote_iovs);
 
-
-
         Ok(rofi)
+        // Rofi::init(self.pmi, hints, eq, tx_cq, rx_cq, tx_cntr, rx_cntr)
     }
+}
+
+// impl  Rofi<(),(),(),()> {
+
+//     pub(crate) fn init<I, EQ, CQ, CNTR>(mut pmi: Box<dyn crate::pmi::PmiTrait>, all_info: Info<I>, info: InfoEntry<I>,
+//     eq: EventQueue<EQ>, tx_cq: CompletionQueue<CQ>, rx_cq: CompletionQueue<CQ>, tx_cntr: Counter<CNTR>, rx_cntr: Counter<CNTR>) -> Result<Rofi<T, EQ, CQ, CNTR>, libfabric::error::Error> 
+//                 where I : Caps + CollCap + RmaDefaultCap, EQ: EqConfig + Waitable, CQ: CqConfig + Waitable, CNTR: CntrConfig + Waitable {
+
+        
+
+
+//         let key = rofi.barrier_mr.get_key();
+//         let mr = rofi.barrier_mr.get_mem().borrow().as_ptr() as u64;
+        
+//         let remote_iovs = rofi.exchange_mr_info(mr, key);
+//         rofi.barrier_mr.set_iovs(remote_iovs);
+
+//         Ok(rofi)
+//     }
+// }
+impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>  
+    where I : Caps + CollCap + RmaDefaultCap, EQ: EqConfig + Waitable, CQ: CqConfig + Waitable, CNTR: CntrConfig + Waitable {
 
     /// Returns the number of processes that take part into this job
     /// 
@@ -254,7 +285,13 @@ impl Rofi {
     pub fn alloc(&mut self, size: usize) ->  Rc<mr::MappedMemoryRegion> {
 
         let mem = self.mr_manager.borrow_mut().alloc(&self.info, &self.domain, &self.ep, size);
-        let remote_iovs = self.exchange_mr_info(mem.get_mem().borrow().as_ptr() as u64, mem.get_key());
+        let remote_iovs = 
+            match mem.get_key() {
+                MrKey::Key(key) => {
+                    self.exchange_mr_info(mem.get_mem().borrow().as_ptr() as u64, *key)
+                }
+                _ => todo!()
+            };
         mem.set_iovs(remote_iovs);
         
         mem.clone()
@@ -278,7 +315,14 @@ impl Rofi {
     pub fn sub_alloc(&mut self, size: usize, pes: &[usize]) ->  Rc<mr::MappedMemoryRegion> {
         
         let mem = self.mr_manager.borrow_mut().alloc(&self.info, &self.domain, &self.ep, size);
-        let remote_iovs = self.sub_exchange_mr_info(mem.get_mem().borrow().as_ptr() as u64, mem.get_key(), pes);
+        let mem_key = 
+            match mem.get_key() {
+                MrKey::Key(key) => {
+                    key
+                }
+                _ => todo!()
+            };
+        let remote_iovs = self.sub_exchange_mr_info(mem.get_mem().borrow().as_ptr() as u64, *mem_key, pes);
         mem.set_sub_iovs(remote_iovs, pes);
     
         mem.clone()
@@ -571,24 +615,31 @@ impl Rofi {
     unsafe fn put_(&mut self, mut dst: usize, src: &[u8], id: usize, block: bool) -> Result<(), std::io::Error> {
 
         let mem = self.mr_get(dst).unwrap();
+        let mem_key = 
+            match mem.get_remote_key(id) {
+                MrKey::Key(key) => {
+                    key
+                }
+                _ => todo!()
+            };
 
         dst = dst - mem.get_start() +  mem.get_remote_start(id);
         let mut rma_iov = if self.info.get_domain_attr().get_mr_mode().is_basic() || 
         self.info.get_domain_attr().get_mr_mode().is_virt_addr() {
-            libfabric::RmaIoVec::new().address( dst as u64)
+            libfabric::iovec::RmaIoVec::new().address( dst as u64)
         }
         else {
-            libfabric::RmaIoVec::new()
-        }.key(mem.get_remote_key(id));
+            libfabric::iovec::RmaIoVec::new()
+        }.key(mem_key);
 
         
         if std::mem::size_of_val(src) < self.info.get_tx_attr().get_inject_size() {
-            debug_println!("P[{}] Injecting put to P[{}]:\n\tSource ptr: {}\n\tDestination ptr (real): {}\n\tKey: {}", self.world.my_id, id, src.as_ptr() as usize, dst, mem.get_remote_key(id));
+            debug_println!("P[{}] Injecting put to P[{}]:\n\tSource ptr: {}\n\tDestination ptr (real): {}\n\tKey: {}", self.world.my_id, id, src.as_ptr() as usize, dst, mem_key);
             unsafe { self.post_rma_inject(&RmaOp::RmaWrite, &rma_iov, src, id) };
 
         }
         else {
-            debug_println!("P[{}] Putting to P[{}]:\n\tSource ptr: {}\n\tDestination ptr (real): {}\n\tKey: {}", self.world.my_id, id, src.as_ptr() as usize, dst, mem.get_remote_key(id));       
+            debug_println!("P[{}] Putting to P[{}]:\n\tSource ptr: {}\n\tDestination ptr (real): {}\n\tKey: {}", self.world.my_id, id, src.as_ptr() as usize, dst, mem_key);       
             
             let mut curr_idx = 0;
             
@@ -611,19 +662,26 @@ impl Rofi {
     unsafe fn get_(&mut self, mut src: usize, dst: &mut[u8], id: usize, block: bool) -> Result<(), std::io::Error> {
         
         let mem = self.mr_get(dst.as_ptr() as usize).unwrap();
-
+        let mem_key = 
+            match mem.get_remote_key(id) {
+                MrKey::Key(key) => {
+                    key
+                }
+                _ => todo!()
+            };
         src = src - mem.get_start() +  mem.get_remote_start(id);
+
 
         let mut rma_iov = if self.info.get_domain_attr().get_mr_mode().is_basic() || 
             self.info.get_domain_attr().get_mr_mode().is_virt_addr() {
 
-            libfabric::RmaIoVec::new().address( src as u64)
+            libfabric::iovec::RmaIoVec::new().address( src as u64)
         }
         else {
-            libfabric::RmaIoVec::new()
+            libfabric::iovec::RmaIoVec::new()
 
-        }.key(mem.get_remote_key(id));
-        debug_println!("P[{}] Getting from P[{}]:\n\tSource ptr (real): {}\n\tDestination ptr: {}\n\tKey: {}", self.world.my_id, id, src, dst.as_ptr() as usize, mem.get_remote_key(id));       
+        }.key(mem_key);
+        debug_println!("P[{}] Getting from P[{}]:\n\tSource ptr (real): {}\n\tDestination ptr: {}\n\tKey: {}", self.world.my_id, id, src, dst.as_ptr() as usize, mem_key);       
 
 
         let mut curr_idx = 0;
@@ -647,17 +705,24 @@ impl Rofi {
 
     fn check_context_comp(&mut self, ctx: &libfabric::Context) -> bool {
 
-        let mut cq_err_entry = libfabric::cq::CqErrEntry::new();
-    
-        let ret = self.tx.cq.read(std::slice::from_mut(&mut cq_err_entry), 1);
+        let ret = self.tx.cq.read(1);
         
         match ret {
-            Ok(_) => {
-                self.tx.cq_cntr += 1; 
+            Ok(completion) => {
+                match completion {
+                    Completion::Context(context_entry) => {
+                        if context_entry.len() == 1{
+
+                            self.tx.cq_cntr += 1; 
+
+                            if context_entry[0].is_op_context_equal(ctx) { //[TODO! CRITICAL]
+                                return true;
+                            }
+                        }
+                    }
+                    _ => todo!()
+                }
             
-                if cq_err_entry.is_op_context_equal(ctx) {
-                    return true;
-                }
             },
             Err(ref err) => {
                 if !matches!(err.kind, libfabric::error::ErrorKind::TryAgain) {
@@ -669,31 +734,32 @@ impl Rofi {
         false
     }
 
-    fn check_event(&mut self, event: &libfabric::enums::Event, ctx: &libfabric::Context) -> bool {
+    // fn check_event(&mut self, event: &libfabric::enums::Event, ctx: &libfabric::Context) -> bool {
 
-        let mut eq_entry: libfabric::eq::EventQueueEntry<libfabric::Context> = libfabric::eq::EventQueueEntry::new();
+    //     let mut eq_entry: libfabric::eq::EventQueueEntry<libfabric::Context> = libfabric::eq::EventQueueEntry::new();
 
-        let ret = self.eq.read(std::slice::from_mut(&mut eq_entry));
+    //     let ret = self.eq.read();
+    //     // std::slice::from_mut(&mut eq_entry));
         
-        match ret {
-            Ok((_, _ev)) => {
-                if matches!(event, _ev) && eq_entry.is_context_equal(ctx) {
-                        return true;
-                }
-            },
-            Err(ref err) => {
-                if !matches!(err.kind, libfabric::error::ErrorKind::TryAgain) {
-                    ret.unwrap();
-                }
-            }
-        }
+    //     match ret {
+    //         Ok((_, _ev)) => {
+    //             if matches!(event, _ev) && eq_entry.is_context_equal(ctx) {
+    //                     return true;
+    //             }
+    //         },
+    //         Err(ref err) => {
+    //             if !matches!(err.kind, libfabric::error::ErrorKind::TryAgain) {
+    //                 ret.unwrap();
+    //             }
+    //         }
+    //     }
 
-        self.flush();
-        // progress(self.tx.cq, 0, self.tx.cq_cntr);
-        // progress(self.rx.cq, 0, rx_cq_cntr);
+    //     self.flush();
+    //     // progress(self.tx.cq, 0, self.tx.cq_cntr);
+    //     // progress(self.rx.cq, 0, rx_cq_cntr);
 
-        false
-    }
+    //     false
+    // }
 
     fn wait_get_all(&mut self) -> Result<(), Error> {
 
@@ -714,40 +780,43 @@ impl Rofi {
         transport::check_cntr(&self.tx.cq_seq, &self.tx.cntr)
     }
 
-    fn sub_exchange_mr_info(&mut self, addr: u64, key: u64, pes: &[usize]) -> Vec<RmaIoVec> {
+    fn sub_exchange_mr_info(&mut self, addr: u64, key: u64, pes: &[usize]) -> Vec<libfabric::iovec::RmaIoVec> {
 
         debug_println!("P[{}] Exchaning mr info with subgroup", self.world.my_id);
-        let mut av_set = self.av.avset(libfabric::av::AddressVectorSetAttr::new()
+        let mut av_set = AddressVectorSetBuilder::new(&self.av)
             .count(pes.len())
-            .start_addr(self.world.addresses[pes[0]])
-            .end_addr(self.world.addresses[pes[0]])
+            .start_addr(self.world.addresses[pes[0]].as_ref().unwrap())
+            .end_addr(self.world.addresses[pes[0]].as_ref().unwrap())
             .stride(1)
-        ).unwrap();
+            .build()
+            .unwrap();
 
         for pe in pes.iter().skip(1) {
-            av_set.insert(self.world.addresses[*pe]).unwrap();
+            av_set.insert(self.world.addresses[*pe].as_ref().expect("Address was not mapped")).unwrap();
         }
 
         let address = av_set.get_addr().unwrap();
-        debug_println!("\tP[{}] AV set address: {}", self.world.my_id, address);
+        // debug_println!("\tP[{}] AV set address: {}", self.world.my_id, address);
         let mut bank = self.ctx_bank.borrow_mut();
         let ctx = bank.create();
+        let mut mut_ctx = ctx.borrow_mut();
         
-        debug_println!("\tP[{}] Creating collective join", self.world.my_id);
-        let mc = self.ep.join_collective_with_context(address, &av_set, 0, &mut ctx.borrow_mut()).unwrap();
-        transport::wait_on_event(&libfabric::enums::Event::JOIN_COMPLETE, &self.eq, &mut self.tx.cq_cntr, &mut self.rx.cq_cntr, &self.tx.cq, &self.rx.cq, &ctx.borrow());
+        debug_println!("\tP[{}] Creating collective join ctx: {}", self.world.my_id, &mut *mut_ctx as *mut libfabric::Context as usize);
+        let mc = self.ep.join_collective_with_context(&address, &av_set, 0, &mut *mut_ctx).unwrap();
+        debug_println!("\tP[{}] Waiting collective join {}", self.world.my_id, &*mut_ctx as *const libfabric::Context as usize);
+        transport::wait_on_event_join(&self.eq, &mut self.tx.cq_cntr, &mut self.rx.cq_cntr, &self.tx.cq, &self.rx.cq, &mut_ctx);
         
-        let address = mc.get_addr();
-        debug_println!("\tP[{}] Done creating collective. MC address: {}", self.world.my_id, address);
+        // let address = mc.get_addr();
+        // debug_println!("\tP[{}] Done creating collective. MC address: {}", self.world.my_id, address);
         
-        let mut rma_iov = libfabric::RmaIoVec::new().address(addr).key(key);
+        let mut rma_iov = libfabric::iovec::RmaIoVec::new().address(addr).key(key);
         debug_println!("\tP[{}] Allgather the following address: {} {}", self.world.my_id, addr, key);
         
-        let mut rma_iovs = (0..pes.len()).map(|_| libfabric::RmaIoVec::new()).collect::<Vec<_>>();
+        let mut rma_iovs = (0..pes.len()).map(|_| libfabric::iovec::RmaIoVec::new()).collect::<Vec<_>>();
         
-        self.ep.allgather_with_context(std::slice::from_mut(&mut rma_iov), &mut libfabric::default_desc(), &mut rma_iovs, &mut libfabric::default_desc(), address, 0, &mut ctx.borrow_mut()).unwrap();
+        mc.allgather_with_context(std::slice::from_mut(&mut rma_iov), &mut libfabric::mr::default_desc(), &mut rma_iovs, &mut libfabric::mr::default_desc(), 0, &mut *mut_ctx).unwrap();
         
-        transport::wait_on_context_comp(&ctx.borrow(), &self.tx.cq, &mut self.tx.cq_cntr);
+        transport::wait_on_context_comp(&mut_ctx, &self.tx.cq, &mut self.tx.cq_cntr);
         
         debug_println!("\tP[{}] Got the following addresses ({}) from all gather:", self.world.my_id,  rma_iovs.len());
         
@@ -760,22 +829,27 @@ impl Rofi {
         rma_iovs
     }
 
-    fn exchange_mr_info(&mut self, addr: u64, key: u64) -> Vec<RmaIoVec> {
+    fn exchange_mr_info(&mut self, addr: u64, key: u64) -> Vec<libfabric::iovec::RmaIoVec> {
 
         let pes: Vec<_> = (0..self.world.nnodes).collect();
-        self.sub_exchange_mr_info(addr, key, &pes)
+        // match key {
+        //     MrKey::Key(key) => {
+                self.sub_exchange_mr_info(addr, key, &pes)
+        //     }
+        //     _ => todo!()
+        // }
     }
 
-    unsafe fn post_rma_inject(&mut self, rma_op: &RmaOp, remote: &libfabric::RmaIoVec, buf: &[u8], id: usize) { // Unsafe because we write to remote 
+    unsafe fn post_rma_inject(&mut self, rma_op: &RmaOp, remote: &libfabric::iovec::RmaIoVec, buf: &[u8], id: usize) { // Unsafe because we write to remote 
         
         match rma_op {
             
             RmaOp::RmaWrite => {
                 let addr = remote.get_address();
                 let key = remote.get_key();
-                let remote_address = self.world.addresses[id];
-                let ep: &Endpoint = &self.ep;
-                unsafe{ transport::post!(inject_write, transport::progress, &self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr, "fi_write", ep, buf, remote_address, addr, key); }
+                let remote_address = &self.world.addresses[id];
+                let ep = &self.ep;
+                unsafe{ transport::post!(inject_write, transport::progress, &self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr, "fi_write", ep, buf, remote_address.as_ref().expect("Address not mapped"), addr, key); }
             }
     
             RmaOp::RmaWriteData => {
@@ -793,9 +867,9 @@ impl Rofi {
         self.tx.cq_cntr += 1;
     }
 
-    unsafe fn  post_rma_mut(&mut self, rma_op: &RmaOp, remote: &libfabric::RmaIoVec, buf: &mut [u8], mr_desc: &mut MemoryRegionDesc, id: usize) {
+    unsafe fn  post_rma_mut(&mut self, rma_op: &RmaOp, remote: &libfabric::iovec::RmaIoVec, buf: &mut [u8], mr_desc: &mut MemoryRegionDesc, id: usize) {
 
-        let remote_address = self.world.addresses[id];
+        let remote_address = &self.world.addresses[id];
         let mut bank = self.ctx_bank.borrow_mut();
         let ctx = bank.create();
 
@@ -804,7 +878,7 @@ impl Rofi {
             RmaOp::RmaWrite => {
                 let addr = remote.get_address();
                 let key = remote.get_key();
-                unsafe{ transport::post!(write_with_context, transport::progress, &self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr, "fi_write", &self.ep, buf, mr_desc, remote_address, addr, key, &mut *ctx.borrow_mut()); }
+                unsafe{ transport::post!(write_with_context, transport::progress, &self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr, "fi_write", &self.ep, buf, mr_desc, remote_address.as_ref().expect("Address not mapped"), addr, key, &mut *ctx.borrow_mut()); }
             }
     
             RmaOp::RmaWriteData => {
@@ -820,13 +894,13 @@ impl Rofi {
             RmaOp::RmaRead => {
                 let addr = remote.get_address();
                 let key = remote.get_key();
-                unsafe{ transport::post!(read_with_context, transport::progress, &self.rx.cq, self.rx.cq_seq, &mut self.rx.cq_cntr, "fi_write", &self.ep, buf, mr_desc, remote_address, addr, key, &mut *ctx.borrow_mut()); }
+                unsafe{ transport::post!(read_with_context, transport::progress, &self.rx.cq, self.rx.cq_seq, &mut self.rx.cq_cntr, "fi_write", &self.ep, buf, mr_desc, remote_address.as_ref().expect("Address not mapped"), addr, key, &mut *ctx.borrow_mut()); }
             }
         }
     }
 
-    unsafe fn  post_rma(&mut self, rma_op: &RmaOp, remote: &libfabric::RmaIoVec, buf: &[u8], mr_desc: &mut MemoryRegionDesc,  id: usize) {
-        let remote_address = self.world.addresses[id];
+    unsafe fn  post_rma(&mut self, rma_op: &RmaOp, remote: &libfabric::iovec::RmaIoVec, buf: &[u8], mr_desc: &mut MemoryRegionDesc,  id: usize) {
+        let remote_address = &self.world.addresses[id];
         let mut bank = self.ctx_bank.borrow_mut();
         let ctx = bank.create();
 
@@ -835,7 +909,7 @@ impl Rofi {
             RmaOp::RmaWrite => {
                 let addr = remote.get_address();
                 let key = remote.get_key();
-                unsafe{ transport::post!(write_with_context, transport::progress, &self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr, "fi_write", &self.ep, buf, mr_desc, remote_address, addr, key, &mut *ctx.borrow_mut()); }
+                unsafe{ transport::post!(write_with_context, transport::progress, &self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr, "fi_write", &self.ep, buf, mr_desc, remote_address.as_ref().expect("Address not mapped"), addr, key, &mut *ctx.borrow_mut()); }
             }
     
             RmaOp::RmaWriteData => {
