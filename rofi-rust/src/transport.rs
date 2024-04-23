@@ -127,7 +127,6 @@ pub(crate) fn wait_on_context_comp<CQ: CqConfig>(ctx: &libfabric::Context, cq: &
             Ok(completion) => {
                 match completion {
                     Completion::Context(entry) => {
-                        println!("FOUND {} {}", entry.len(), ctx as *const libfabric::Context as usize);
                         if entry.len() == 1 && entry[0].is_op_context_equal(ctx) { //[TODO! CRITICAL!]
                             *cq_cntr += 1; 
                             break;
