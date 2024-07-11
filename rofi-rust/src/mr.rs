@@ -4,8 +4,7 @@ use std::rc::Rc;
 use std::vec::Vec;
 use crate::transport;
 use libfabric::infocapsoptions::Caps;
-use libfabric::mr::{MemoryRegion, MemoryRegionDesc, MrKey};
-use libfabric::iovec::RmaIoVec;
+use libfabric::mr::{MemoryRegion, MemoryRegionDesc, MemoryRegionKey, MappedMemoryRegionKey};
 use libfabric::info::InfoEntry;
 extern crate memmap;
 
@@ -13,15 +12,44 @@ pub struct MappedMemoryRegion { // [TODO] Make Drop remove this from the rofi me
     mem: Rc<RefCell<memmap::MmapMut>>,
     mr: libfabric::mr::MemoryRegion,
     desc: libfabric::mr::MemoryRegionDesc,
-    key: MrKey,
-    iovs: OnceCell<Vec<RmaIoVec>>,
+    key: MemoryRegionKey,
+    iovs: OnceCell<Vec<RmaInfo>>,
     range: std::ops::Range<usize>,
     pes_map: OnceCell<HashMap<usize, usize>>,
 }
 
+pub struct RmaInfo {
+    pub(crate) mem_address: u64,
+    len: usize,
+    key: Rc<MappedMemoryRegionKey>,
+}
+
+impl RmaInfo {
+
+    pub fn new(mem_address: u64, len: usize, key: &Rc<MappedMemoryRegionKey>) -> Self {
+        Self {
+            mem_address,
+            len,
+            key: key.clone(),
+        }
+    }
+
+    pub fn mem_address(&self) -> u64 {
+        self.mem_address
+    }
+    
+    pub fn mem_len(&self) -> usize {
+        self.len
+    }
+    
+    pub fn key(&self) -> &Rc<MappedMemoryRegionKey> {
+        &self.key
+    }
+}
+
 impl MappedMemoryRegion {
 
-    pub(crate) fn new(mem: memmap::MmapMut, mr: libfabric::mr::MemoryRegion, desc: libfabric::mr::MemoryRegionDesc, key: MrKey) -> Self {
+    pub(crate) fn new(mem: memmap::MmapMut, mr: libfabric::mr::MemoryRegion, desc: libfabric::mr::MemoryRegionDesc, key: MemoryRegionKey) -> Self {
         let start =  mem.as_ptr() as usize;
         let end =   mem.last().unwrap() as *const u8 as usize;
 
@@ -44,16 +72,20 @@ impl MappedMemoryRegion {
     pub(crate) fn get_remote_start(&self, remote_id: usize) -> usize {
         
         let id = self.get_real_id(remote_id);
-        self.iovs.get().unwrap()[id].get_address() as usize
+        self.iovs.get().unwrap()[id].mem_address() as usize
     }
 
-    pub(crate) fn set_iovs(&self, iovs: Vec<RmaIoVec>) {
-        self.iovs.set(iovs).unwrap();
+    pub(crate) fn set_rma_infos(&self, iovs: Vec<RmaInfo>) {
+        if self.iovs.set(iovs).is_err() {
+            panic!("Could not set rma_infos");
+        }
         self.pes_map.set(HashMap::new()).unwrap();
     }
 
-    pub(crate) fn set_sub_iovs(&self, iovs: Vec<RmaIoVec>, pes: &[usize]) {
-        self.iovs.set(iovs).expect("Could not set iovs");
+    pub(crate) fn set_sub_rma_infos(&self, iovs: Vec<RmaInfo>, pes: &[usize]) {
+        if self.iovs.set(iovs).is_err() {
+            panic!("Could not set rma_infos");
+        }
         
         let mut id_to_iov_map = HashMap::new();
         
@@ -67,7 +99,7 @@ impl MappedMemoryRegion {
     pub(crate) fn get_remote_end(&self, remote_id: usize) -> usize {
         
         let id = self.get_real_id(remote_id);
-        let start = self.iovs.get().unwrap()[id].get_address() as usize;
+        let start = self.iovs.get().unwrap()[id].mem_address() as usize;
         start + self.mem.borrow().len()
     }
 
@@ -78,15 +110,15 @@ impl MappedMemoryRegion {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn get_key(&self) -> &MrKey {
+    pub(crate) fn get_key(&self) -> &MemoryRegionKey {
         
         &self.key
     }
 
-    pub(crate) fn get_remote_key(&self, remote_id: usize) -> MrKey { // Should be mapped key
+    pub(crate) fn get_remote_key(&self, remote_id: usize) -> &Rc<MappedMemoryRegionKey> { // Should be mapped key
         
         let id = self.get_real_id(remote_id);
-        unsafe{MrKey::from_u64(self.iovs.get().unwrap()[id].get_key())}
+        self.iovs.get().unwrap()[id].key()
 
     }
 
@@ -100,8 +132,8 @@ impl MappedMemoryRegion {
 
         let id = self.get_real_id(remote_id);
 
-        let remote_start = self.iovs.get().unwrap()[id].get_address() as usize;
-        let remote_end = self.iovs.get().unwrap()[id].get_address() as usize + self.mem.borrow().len();
+        let remote_start = self.iovs.get().unwrap()[id].mem_address() as usize;
+        let remote_end = self.iovs.get().unwrap()[id].mem_address() as usize + self.mem.borrow().len();
 
         if addr >= remote_start && addr < remote_end {
             return true;

@@ -1,7 +1,7 @@
 use debug_print::debug_println;
-use libfabric::{av::{AddressVector, AddressVectorBuilder}, cntr::{Counter, CounterBuilder}, cq::{CompletionQueue, CompletionQueueBuilder, Completion}, ep::{Endpoint, EndpointBuilder}, eq::EventQueue, error::Error, info::{InfoEntry, InfoCapsImpl}, cqoptions::{self, CqConfig}, cntroptions::{self, CntrConfig}, eqoptions::EqConfig, infocapsoptions::Caps, Waitable, mr::{MemoryRegionBuilder, MrKey}};
+use libfabric::{av::{AddressVector, AddressVectorBuilder}, cntr::{Counter, CounterBuilder}, cq::{CompletionQueue, CompletionQueueBuilder, Completion, CompletionQueueImpl, CompletionQueueImplT}, ep::{Endpoint, EndpointBuilder}, eq::{EventQueue, EventQueueImplT}, error::Error, info::{InfoEntry, InfoCapsImpl}, cqoptions::{CqConfig}, cntroptions::{self, CntrConfig}, eqoptions::EqConfig, infocapsoptions::Caps, Waitable, mr::{MemoryRegionBuilder, MemoryRegionKey}};
 
-pub(crate) fn init_ep_resources<I: Caps, EQ: EqConfig + 'static>(info: &InfoEntry<I>, domain: &libfabric::domain::Domain, eq: &libfabric::eq::EventQueue<EQ>) -> Result<(CompletionQueue<cqoptions::Options<cqoptions::WaitNoRetrieve, cqoptions::Off>>, CompletionQueue<cqoptions::Options<cqoptions::WaitNoRetrieve, cqoptions::Off>>, Counter<cntroptions::Options<cntroptions::WaitNoRetrieve, cntroptions::Off>>, Counter<cntroptions::Options<cntroptions::WaitNoRetrieve, cntroptions::Off>>, AddressVector, Endpoint<I>), libfabric::error::Error> {
+pub(crate) fn init_ep_resources<I: Caps, EQ: EventQueueImplT + 'static>(info: &InfoEntry<I>, domain: &libfabric::domain::Domain, eq: &libfabric::eq::EventQueue<EQ>) -> Result<(CompletionQueue<CompletionQueueImpl<true, false, false>>, CompletionQueue<CompletionQueueImpl<true, false, false>>, Counter<cntroptions::Options<cntroptions::WaitNoRetrieve, cntroptions::Off>>, Counter<cntroptions::Options<cntroptions::WaitNoRetrieve, cntroptions::Off>>, AddressVector, Endpoint<I>), libfabric::error::Error> {
 
     let tx_cntr = CounterBuilder::new(domain).build().unwrap();
     let rx_cntr = CounterBuilder::new(domain).build().unwrap(); // Default : FI_CNTR_EVENTS_COMP, FI_WAIT_UNSPEC
@@ -51,18 +51,18 @@ pub(crate) fn init_ep_resources<I: Caps, EQ: EqConfig + 'static>(info: &InfoEntr
     Ok((tx_cq, rx_cq, tx_cntr, rx_cntr, av, ep))
 }
 
-pub(crate) fn progress<CQ: CqConfig>(cq: &libfabric::cq::CompletionQueue<CQ>, _total: u64, cq_cntr: &mut u64) {
+pub(crate) fn progress(cq: &impl CompletionQueueImplT, _total: u64, cq_cntr: &mut u64) {
 
     let ret = cq.read(1);
     match ret {
         Ok(completion) => {
             match completion {
-                Completion::Context(entries) => {
+                Completion::Ctx(entries) | Completion::Unspec(entries) => {
                     if entries.len() == 1 {
                         *cq_cntr += 1;
                     }
                 }
-                Completion::Message(entries) => {
+                Completion::Msg(entries) => {
                     if entries.len() == 1 {
                         *cq_cntr += 1;
                     }
@@ -74,11 +74,6 @@ pub(crate) fn progress<CQ: CqConfig>(cq: &libfabric::cq::CompletionQueue<CQ>, _t
                 }
                 Completion::Tagged(entries) => {
                     if entries.len() == 1 {
-                        *cq_cntr += 1;
-                    }
-                }
-                Completion::Unspec(num_read) => {
-                    if num_read == 1 {
                         *cq_cntr += 1;
                     }
                 }
@@ -117,7 +112,7 @@ pub(crate) fn check_cntr<CNTR: CntrConfig>(pending_cntr: &u64, cntr: &Counter<CN
     cntr.read() <= *pending_cntr
 }
 
-pub(crate) fn wait_on_context_comp<CQ: CqConfig>(ctx: &libfabric::Context, cq: &CompletionQueue<CQ>, cq_cntr: &mut u64) {
+pub(crate) fn wait_on_context_comp(ctx: &libfabric::Context, cq: &impl CompletionQueueImplT, cq_cntr: &mut u64) {
 
     loop {
 
@@ -126,7 +121,7 @@ pub(crate) fn wait_on_context_comp<CQ: CqConfig>(ctx: &libfabric::Context, cq: &
         match ret {
             Ok(completion) => {
                 match completion {
-                    Completion::Context(entry) => {
+                    Completion::Ctx(entry) => {
                         if entry.len() == 1 && entry[0].is_op_context_equal(ctx) { //[TODO! CRITICAL!]
                             *cq_cntr += 1; 
                             break;
@@ -144,7 +139,7 @@ pub(crate) fn wait_on_context_comp<CQ: CqConfig>(ctx: &libfabric::Context, cq: &
     }
 }
 
-pub(crate) fn wait_on_event_join<EQ: EqConfig,CQ: CqConfig>(eq: &EventQueue<EQ>, tx_cq_cntr: &mut u64, rx_cq_cntr: &mut u64, tx_cq: &CompletionQueue<CQ>, rx_cq: &CompletionQueue<CQ>, ctx: &libfabric::Context) {
+pub(crate) fn wait_on_event_join(eq: &impl EventQueueImplT, tx_cq_cntr: &mut u64, rx_cq_cntr: &mut u64, tx_cq: &impl CompletionQueueImplT, rx_cq: &impl CompletionQueueImplT, ctx: &libfabric::Context) {
 
     // let mut eq_entry: EventQueueEntry<libfabric::Context> = libfabric::eq::EventQueueEntry::new();
     loop {
@@ -155,14 +150,11 @@ pub(crate) fn wait_on_event_join<EQ: EqConfig,CQ: CqConfig>(eq: &EventQueue<EQ>,
         match ret {
             Ok(event) => {
                 debug_println!("Found event");
-                match event {
-                    libfabric::eq::Event::JOIN_COMPLETE(entry) => {
-                        debug_println!("Found join event");
-                        if entry.is_context_equal(ctx) {
-                            break;
-                        }
+                if let libfabric::eq::Event::JoinComplete(entry) = event {
+                    debug_println!("Found join event");
+                    if entry.is_context_equal(ctx) {
+                        break;
                     }
-                    _ => {}
                 }
             },
             Err(ref err) => {
@@ -177,12 +169,12 @@ pub(crate) fn wait_on_event_join<EQ: EqConfig,CQ: CqConfig>(eq: &EventQueue<EQ>,
     } 
 }
 
-pub(crate) fn reg_mr<I: Caps>(info: &InfoEntry<I>, domain: &libfabric::domain::Domain, ep: &libfabric::ep::Endpoint<I>, buf: &mut [u8], key: u64) -> Result<(libfabric::mr::MemoryRegion, libfabric::mr::MemoryRegionDesc, MrKey), Error> {
+pub(crate) fn reg_mr<I: Caps>(info: &InfoEntry<I>, domain: &libfabric::domain::Domain, ep: &libfabric::ep::Endpoint<I>, buf: &mut [u8], key: u64) -> Result<(libfabric::mr::MemoryRegion, libfabric::mr::MemoryRegionDesc, MemoryRegionKey), Error> {
 
     if !need_mr_reg(info) {
         println!("MR not needed");
     }
-    let iov = libfabric::iovec::IoVec::from_slice(buf);
+    // let iov = libfabric::iovec::IoVec::from_slice(buf);
     // let mut mr_attr = libfabric::mr::MemoryRegionAttr::new().iov(std::slice::from_ref(&iov)).requested_key(key).iface(libfabric::enums::HmemIface::SYSTEM);
 
         // MemoryRegionBuilder::new(domain)
@@ -190,17 +182,19 @@ pub(crate) fn reg_mr<I: Caps>(info: &InfoEntry<I>, domain: &libfabric::domain::D
         //     .requested_key(key)
         //     .iface(libfabric::enums::HmemIface::SYSTEM)
 
-    let mr = info_to_mr_attr(info, domain)
-        .iov(std::slice::from_ref(&iov))
+    let mr = info_to_mr_attr(info, domain, &buf)
+        // .iov(std::slice::from_ref(&iov))
         .requested_key(key)
         .iface(libfabric::enums::HmemIface::SYSTEM)
         .build()?;
 
     let desc = mr.description();
-
+    
+    // [TODO]
     if info.get_domain_attr().get_mr_mode().is_endpoint() {
-        println!("MR ENDPOINT");
-        mr.bind_ep(ep)?;
+        todo!()
+    //     println!("MR ENDPOINT");
+    //     mr.bind_ep(ep)?;
     }
 
     let key = mr.key()?;
@@ -248,9 +242,9 @@ fn check_mr_local_flag<I: Caps>(info: &InfoEntry<I>) -> bool {
     info.get_mode().is_local_mr() || info.get_domain_attr().get_mr_mode().is_local()
 }
 
-pub fn info_to_mr_attr<'a, I: Caps>(info: &'a InfoEntry<I>, domain: &'a libfabric::domain::Domain) -> libfabric::mr::MemoryRegionBuilder<'a>{
+pub fn info_to_mr_attr<'a, 'b, I: Caps>(info: &'a InfoEntry<I>, domain: &'a libfabric::domain::Domain, buff: &'b [u8]) -> libfabric::mr::MemoryRegionBuilder<'a, 'b, u8>{
 
-    let mut mr_region =  MemoryRegionBuilder::new(domain);
+    let mut mr_region =  MemoryRegionBuilder::new(domain, buff);
 
     if check_mr_local_flag(info) {
         if info.get_caps().is_msg() || info.get_caps().is_tagged() {
