@@ -1,18 +1,20 @@
 use debug_print::debug_println;
-use libfabric::{av::{AddressVector, AddressVectorBuilder}, cntr::{Counter, CounterBuilder}, cq::{CompletionQueue, CompletionQueueBuilder, Completion, CompletionQueueImpl, CompletionQueueImplT}, ep::{Endpoint, EndpointBuilder}, eq::{EventQueue, EventQueueImplT}, error::Error, info::{InfoEntry, InfoCapsImpl}, cntroptions::{self, CntrConfig},infocapsoptions::Caps, Waitable, mr::{MemoryRegionBuilder, MemoryRegionKey}};
+use libfabric::{async_::{av::{AddressVector, AddressVectorBuilder}, cq::{CompletionQueue, CompletionQueueBuilder, AsyncCompletionQueueImpl}, ep::{Endpoint, EndpointBuilder}, domain::Domain, eq::{AsyncEventQueueImplT, AsyncEventQueueImpl}, mr::{MemoryRegionBuilder, MemoryRegion}}, infocapsoptions::Caps, eq::EventQueueImplT, info::{InfoEntry, InfoCapsImpl}, cq::{CompletionQueueImpl, CompletionQueueImplT, Completion}, cntr::{CounterBuilder, Counter}, cntroptions::{self, CntrConfig}, Waitable, mr::MemoryRegionKey, error::Error};
 
-pub(crate) fn init_ep_resources<I: Caps, EQ: EventQueueImplT + 'static>(info: &InfoEntry<I>, domain: &libfabric::domain::Domain, eq: &libfabric::eq::EventQueue<EQ>) -> Result<(CompletionQueue<CompletionQueueImpl<true, false, false>>, CompletionQueue<CompletionQueueImpl<true, false, false>>, Counter<cntroptions::Options<cntroptions::WaitNoRetrieve, cntroptions::Off>>, Counter<cntroptions::Options<cntroptions::WaitNoRetrieve, cntroptions::Off>>, AddressVector, Endpoint<I>), libfabric::error::Error> {
+pub(crate) fn init_ep_resources<I: Caps, EQ: AsyncEventQueueImplT + 'static>(info: &InfoEntry<I>, domain: &Domain, eq: &libfabric::eq::EventQueue<EQ>) -> Result<(CompletionQueue<AsyncCompletionQueueImpl>, CompletionQueue<AsyncCompletionQueueImpl>, Counter<cntroptions::Options<cntroptions::WaitNoRetrieve, cntroptions::Off>>, Counter<cntroptions::Options<cntroptions::WaitNoRetrieve, cntroptions::Off>>, AddressVector, Endpoint<I>), libfabric::error::Error> {
 
     let tx_cntr = CounterBuilder::new(domain).build().unwrap();
     let rx_cntr = CounterBuilder::new(domain).build().unwrap(); // Default : FI_CNTR_EVENTS_COMP, FI_WAIT_UNSPEC
 
+    println!("Creating completion queue");
     let tx_cq =  CompletionQueueBuilder::new(domain)
         .format(libfabric::enums::CqFormat::CONTEXT)
         .size(info.get_tx_attr().get_size())
         .build()
         .unwrap();
 
-    let rx_cq =  CompletionQueueBuilder::new(&domain)
+    println!("Creating completion queue");
+    let rx_cq =  CompletionQueueBuilder::new(domain)
         .format(libfabric::enums::CqFormat::CONTEXT)
         .size(info.get_rx_attr().get_size())
         .build()
@@ -21,12 +23,12 @@ pub(crate) fn init_ep_resources<I: Caps, EQ: EventQueueImplT + 'static>(info: &I
     let av = 
         match info.get_domain_attr().get_av_type() {
             libfabric::enums::AddressVectorType::Unspec => {
-                AddressVectorBuilder::new(domain)
+                AddressVectorBuilder::new(domain, eq)
                     .build()
                     .unwrap()
             }
             _ =>  {
-                AddressVectorBuilder::new(domain)
+                AddressVectorBuilder::new(domain, eq)
                     .type_(info.get_domain_attr().get_av_type())
                     .count(10)
                     .build()
@@ -41,8 +43,8 @@ pub(crate) fn init_ep_resources<I: Caps, EQ: EventQueueImplT + 'static>(info: &I
     ep.bind_cntr().write().remote_write().cntr(&tx_cntr).unwrap();
     ep.bind_cntr().read().remote_read().cntr(&rx_cntr).unwrap();
 
-    ep.bind_cq().transmit(true).cq(&tx_cq).unwrap();
-    ep.bind_cq().recv(true).cq(&rx_cq).unwrap();
+    ep.bind_cq().transmit(false).cq(&tx_cq).unwrap();
+    ep.bind_cq().recv(false).cq(&rx_cq).unwrap();
 
     ep.bind_eq(eq).unwrap();
 
@@ -146,11 +148,12 @@ pub(crate) fn wait_on_event_join(eq: &impl EventQueueImplT, tx_cq_cntr: &mut u64
 
         let ret = eq.read();
         
+        // debug_println!("Waiting for event");
         match ret {
             Ok(event) => {
                 debug_println!("Found event");
                 if let libfabric::eq::Event::JoinComplete(entry) = event {
-                    debug_println!("Found join event {}", ctx as *const libfabric::Context as usize);
+                    debug_println!("Found join event");
                     if entry.is_context_equal(ctx) {
                         break;
                     }
@@ -168,7 +171,7 @@ pub(crate) fn wait_on_event_join(eq: &impl EventQueueImplT, tx_cq_cntr: &mut u64
     } 
 }
 
-pub(crate) fn reg_mr<I: Caps>(info: &InfoEntry<I>, domain: &libfabric::domain::Domain, ep: &libfabric::ep::Endpoint<I>, buf: &mut [u8], key: u64) -> Result<(libfabric::mr::MemoryRegion, libfabric::mr::MemoryRegionDesc, MemoryRegionKey), Error> {
+pub(crate) fn reg_mr<I: Caps>(info: &InfoEntry<I>, domain: &Domain, ep: &Endpoint<I>, buf: &mut [u8], key: u64) -> Result<(MemoryRegion, libfabric::mr::MemoryRegionDesc, MemoryRegionKey), Error> {
 
     if !need_mr_reg(info) {
         println!("MR not needed");
@@ -241,7 +244,7 @@ fn check_mr_local_flag<I: Caps>(info: &InfoEntry<I>) -> bool {
     info.get_mode().is_local_mr() || info.get_domain_attr().get_mr_mode().is_local()
 }
 
-pub fn info_to_mr_attr<'a, 'b, I: Caps>(info: &'a InfoEntry<I>, domain: &'a libfabric::domain::Domain, buff: &'b [u8]) -> libfabric::mr::MemoryRegionBuilder<'a, 'b, u8>{
+pub fn info_to_mr_attr<'a, 'b, I: Caps>(info: &'a InfoEntry<I>, domain: &'a Domain, buff: &'b [u8]) -> MemoryRegionBuilder<'a, 'b, u8>{
 
     let mut mr_region =  MemoryRegionBuilder::new(domain, buff);
 
