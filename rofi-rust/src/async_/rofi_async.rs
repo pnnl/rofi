@@ -1,5 +1,7 @@
 
+use futures::future;
 // mod async_rofi;
+use libfabric::error::ErrorKind::ErrorInQueue;
 use std::cell::RefCell;
 use std::rc::Rc;
 // use crate::mr::{MappedMemoryRegion, MemoryRegionManager, RmaInfo};
@@ -307,13 +309,16 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
     pub async fn alloc(&mut self, size: usize) ->  Rc<MappedMemoryRegion> {
 
         let mem = self.mr_manager.borrow_mut().alloc(&self.info, &self.domain, &self.ep, size);
+        let addr = mem.get_mem().borrow().as_ptr() as u64;
+        
         let remote_iovs = 
             match mem.get_key() {
                 MemoryRegionKey::Key(key) => {
-                    self.exchange_mr_info(mem.get_mem().borrow().as_ptr() as u64, *key).await
+                    self.exchange_mr_info(addr, *key).await
                 }
                 _ => todo!()
             };
+
         let remote_infos: Vec<RmaInfo> = remote_iovs.iter().map(|iov| {RmaInfo::new(iov.get_address(), iov.get_len(), &Rc::new(unsafe{MemoryRegionKey::from_u64(iov.get_key())}.into_mapped(&self.domain).unwrap()) )}).collect();
 
         mem.set_rma_infos(remote_infos);
@@ -346,15 +351,15 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
                 }
                 _ => todo!()
             };
-        let remote_iovs = self.sub_exchange_mr_info(mem.get_mem().borrow().as_ptr() as u64, *mem_key, pes).await;
+        let addr = mem.get_mem().borrow().as_ptr() as u64;
+        let remote_iovs = self.sub_exchange_mr_info(addr, *mem_key, pes).await;
         let rma_infos : Vec<RmaInfo> = remote_iovs.iter().map(|iov| {RmaInfo::new(iov.get_address(), iov.get_len(), &Rc::new(unsafe{MemoryRegionKey::from_u64(iov.get_key())}.into_mapped(&self.domain).unwrap())) }).collect();
         mem.set_sub_rma_infos(rma_infos, pes);
     
         mem.clone()
     }
 
-    /// Initiate a transfer of data in `src` to the memory address `dst` at PE `id`and wait for its completion
-    /// Buffer `src` can be reused immediately once the call returns.
+    /// Initiate a transfer of data in `src` to the memory address `dst` at PE `id`and return immediately
     /// 
     /// # Safety
     /// This function is unsafe as the destination memory address might be mutated by other PEs at the same time
@@ -370,58 +375,12 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
     /// 
     /// unsafe { rofi.iput(&mem[128..].as_ptr() as usize, &src, 1).unwrap() };
     /// ```
-    pub unsafe fn iput(&mut self, dst: usize, src: &[u8], id: usize) -> Result<(), std::io::Error> {
+    pub async unsafe fn put(&self, dst: usize, src: &[u8], id: usize) -> Result<(), std::io::Error> {
 
-        self.put_(dst, src, id, true)
-    }
-
-    /// Initiate a transfer of data in `src` to the memory address `dst` at PE `id`and return immediately.
-    /// Call returns before the operation has been completed so users are expected to check for its completion
-    /// before modifying the data in `src`.
-    /// 
-    /// # Safety
-    /// This function is unsafe as the destination memory address might be mutated by other PEs at the same time 
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use rofi_rust::RofiBuilder;
-    /// 
-    /// let mut rofi = RofiBuilder::new().build();
-    /// let mem = rofi.alloc(256);
-    /// let src = [0_u8; 256];
-    /// 
-    /// unsafe { rofi.put(mem[0..256].as_ptr() as usize, &src, 1).unwrap() };
-    /// ```
-    pub unsafe fn put(&mut self, dst: usize, src: &[u8], id: usize) -> Result<(), std::io::Error> {
-
-        self.put_(dst, src, id, false)
-    }
-
-    /// Initiate a transfer from data in memory address `src` at PE `id` to buffer slice `dst` and wait for its completion.
-    /// Buffer `dst` can be used immediately once the call returns.
-    /// 
-    /// # Safety
-    /// This function is unsafe as the src memory address might be mutated by other PEs at the same time 
-    /// 
-    /// # Examples
-    ///
-    /// ```
-    /// use rofi_rust::RofiBuilder;
-    ///
-    /// let mut rofi = RofiBuilder::new().build();
-    /// let mem = rofi.alloc(256);
-    /// let dst = [0_u8; 256];
-    /// unsafe { rofi.iget(mem[0..256].as_ptr() as usize, &mut dst, 1).unwrap() };
-    /// ```
-    pub unsafe fn iget(&mut self, src: usize, dst: &mut[u8], id: usize) -> Result<(), std::io::Error> {
-
-        self.get_(src, dst, id, true)
+        self.put_(dst, src, id, true).await
     }
 
     /// Initiate a transfer from data in memory address `src` at PE `id` to buffer slice `dst` and return immediately.
-    /// Call returns before the operation has been completed so users are expected to check for its completion
-    /// before using the data in `dst`.
     /// 
     /// # Safety
     /// This function is unsafe as the src memory address might be mutated by other PEs at the same time 
@@ -436,9 +395,9 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
     /// let dst = [0_u8; 256];
     /// unsafe { rofi.get(mem[0..256].as_ptr() as usize, &mut dst, 1).unwrap() };
     /// ```
-    pub unsafe fn get(&mut self, src: usize, dst: &mut[u8], id: usize) -> Result<(), std::io::Error> {
+    pub async unsafe fn get(&mut self, src: usize, dst: &mut[u8], id: usize) -> Result<(), std::io::Error> {
 
-        self.get_(src, dst, id, false)
+        self.get_(src, dst, id, false).await
     }
 
     /// Block the calling PE until all outstanding remote operations have completed.
@@ -523,8 +482,8 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
     /// rofi.flush();
     /// ```
     pub fn flush(&mut self) {
-        crate::transport::progress(&self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr);
-        crate::transport::progress(&self.rx.cq, self.rx.cq_seq, &mut self.rx.cq_cntr);
+        transport::progress(&self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr);
+        transport::progress(&self.rx.cq, self.rx.cq_seq, &mut self.rx.cq_cntr);
     }
 
 
@@ -541,7 +500,7 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
     /// let mut rofi = RofiBuilder::new().build();
     /// rofi.barrier();
     /// ```
-    pub fn barrier(&mut self) {
+    pub async fn barrier(&mut self) {
         debug_println!("P[{}] Calling Barrier:", self.world.my_id);
         let n = 2;
         let num_pes = self.world.nnodes ;
@@ -558,7 +517,7 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
                 let dst = barrier_ptr + 8 * self.world.my_id;
                 debug_println!("\tP[{}] Round {} Sending BarrierID to: {}", self.world.my_id, round, send_pe);
                 
-                unsafe { self.iput(dst, src, send_pe).unwrap() };
+                unsafe { self.put(dst, src, send_pe).await.unwrap() };
             }
             
             for i in 1..=n {
@@ -567,8 +526,8 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
                 
                 debug_println!("\tP[{}] Round {} Receiving BarrierID from: {}, Current Value: {}", self.world.my_id, round, recv_pe, barrier_vec[recv_pe]);
                 while self.barrier_id > barrier_vec[recv_pe] {
-                    crate::transport::progress(&self.rx.cq, self.rx.cq_seq, &mut self.rx.cq_cntr);
-                    crate::transport::progress(&self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr);
+                    transport::progress(&self.rx.cq, self.rx.cq_seq, &mut self.rx.cq_cntr);
+                    transport::progress(&self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr);
                     std::thread::yield_now();
                 }
             } 
@@ -591,7 +550,7 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
     /// let pes: Vec<usize> = (0..3).collect();
     /// rofi.sub_barrier(&pes);
     /// ```
-    pub fn sub_barrier(&mut self, pes: &[usize]) {
+    pub async fn sub_barrier(&mut self, pes: &[usize]) {
         
         let n = 2_usize;
         let num_pes = pes.len();
@@ -604,13 +563,22 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
         
 
         for round in 0..num_rounds as usize {
-            for i in 1..=n {
-                let send_pe = euclid_rem(self.world.my_id as i64 + i as i64 * (n as i64 + 1).pow(round as u32), num_pes as i64 );
-                let send_pe = pes[send_pe];
-                let dst = barrier_ptr + 8 * self.world.my_id ;
-
-                unsafe { self.iput(dst,  src, send_pe).unwrap() };
+            
+            {
+                let id = self.world.my_id as i64;
+                let mut futs = Vec::new();
+                for i in 1..=n {
+                    let send_pe = euclid_rem(id + i as i64 * (n as i64 + 1).pow(round as u32), num_pes as i64 );
+                    let send_pe = pes[send_pe];
+                    let dst = barrier_ptr + 8 * id as usize ;
+                    
+                    // futs.insert(0, unsafe { self.put(dst,  src, send_pe)})
+                    futs.push(unsafe { self.put(dst,  src, send_pe)})
+                }
+                debug_println!("Waiting for all puts");
+                futures::future::join_all(futs).await;
             }
+
 
             for i in 1..=n {
                 let recv_pe = euclid_rem(self.world.my_id as i64 - i as i64 * (n as i64 + 1).pow(round as u32), num_pes as i64 );
@@ -618,8 +586,8 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
                 let barrier_vec = unsafe {std::slice::from_raw_parts(barrier_ptr as *const usize,  8 * self.world.nnodes) };
                 
                 while self.barrier_id > barrier_vec[recv_pe] {
-                    crate::transport::progress(&self.rx.cq, self.rx.cq_seq, &mut self.rx.cq_cntr);
-                    crate::transport::progress(&self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr);
+                    transport::progress(&self.rx.cq, self.rx.cq_seq, &mut self.rx.cq_cntr);
+                    transport::progress(&self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr);
 
                     std::thread::yield_now();
                 }
@@ -637,7 +605,7 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
         self.mr_manager.borrow().mr_get_from_remote(addr, remote_id)
     }
 
-    unsafe fn put_(&mut self, mut dst: usize, src: &[u8], id: usize, block: bool) -> Result<(), std::io::Error> {
+    async unsafe fn put_(&self, mut dst: usize, src: &[u8], id: usize, block: bool) -> Result<(), std::io::Error> {
 
         let mem = self.mr_get(dst).unwrap();
         // let mem_key = 
@@ -659,7 +627,7 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
             libfabric::iovec::RmaIoVec::new()
         };
         
-        let mut rma_info = RmaInfo::new(rma_iov.get_address(), rma_iov.get_len(), &mapped_key);
+        let mut rma_info = RmaInfo::new(rma_iov.get_address(), rma_iov.get_len(), mapped_key);
         
         if std::mem::size_of_val(src) < self.info.get_tx_attr().get_inject_size() {
             debug_println!("P[{}] Injecting put to P[{}]:\n\tSource ptr: {}\n\tDestination ptr (real): {}\n", self.world.my_id, id, src.as_ptr() as usize, dst);
@@ -672,21 +640,17 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
             
             while curr_idx < src.len() {
                 let msg_len = std::cmp::min(src.len() - curr_idx, self.info.get_ep_attr().get_max_msg_size()); 
-                self.post_rma(&RmaOp::RmaWrite, &rma_info, &src[curr_idx..curr_idx+msg_len], &mut mem.get_mr_desc(), id);
+                self.post_rma(&RmaOp::RmaWrite, &rma_info, &src[curr_idx..curr_idx+msg_len], &mut mem.get_mr_desc(), id).await;
                 dst += msg_len;
                 curr_idx += msg_len;
                 rma_info.mem_address = dst as u64;
             }
         }
 
-        if block {
-            self.wait_put_all().unwrap();
-        }
-
         Ok(())
     }
 
-    unsafe fn get_(&mut self, mut src: usize, dst: &mut[u8], id: usize, block: bool) -> Result<(), std::io::Error> {
+    async unsafe fn get_(&mut self, mut src: usize, dst: &mut[u8], id: usize, block: bool) -> Result<(), std::io::Error> {
         
         let mem = self.mr_get(dst.as_ptr() as usize).unwrap();
         // let mem_key = 
@@ -710,23 +674,20 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
 
         };
         debug_println!("P[{}] Getting from P[{}]:\n\tSource ptr (real): {}\n\tDestination ptr: {}\n", self.world.my_id, id, src, dst.as_ptr() as usize);       
-        let mut rma_info = RmaInfo::new(rma_iov.get_address(), rma_iov.get_len(), &mapped_key);
+        let mut rma_info = RmaInfo::new(rma_iov.get_address(), rma_iov.get_len(), mapped_key);
 
         let mut curr_idx = 0;
 
         while curr_idx < dst.len() {
             let msg_len = std::cmp::min(dst.len() - curr_idx,  self.info.get_ep_attr().get_max_msg_size());
-            self.post_rma_mut(&RmaOp::RmaRead, &rma_info, &mut dst[curr_idx..curr_idx+msg_len], &mut mem.get_mr_desc(), id);
+            println!("P[{}] Reading", self.world.my_id);
+            self.post_rma_mut(&RmaOp::RmaRead, &rma_info, &mut dst[curr_idx..curr_idx+msg_len], &mut mem.get_mr_desc(), id).await;
+            println!("P[{}] Done reading", self.world.my_id);
             src += msg_len;
             curr_idx += msg_len;
             rma_info.mem_address = src as u64;
         }
 
-
-        if block {
-            debug_println!("P[{}] Waiting for get completion", self.world.my_id);
-            self.wait_get_all().unwrap();
-        }
         debug_println!("P[{}] Done with get", self.world.my_id);
         Ok(())
     }
@@ -791,21 +752,21 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
 
     fn wait_get_all(&mut self) -> Result<(), Error> {
 
-        crate::transport::wait_on_cntr(&mut self.rx.cq_seq, &self.rx.cntr)
+        transport::wait_on_cntr(&mut self.rx.cq_seq, &self.rx.cntr)
     }
 
     fn check_get_all(&self) -> bool {
 
-        crate::transport::check_cntr(&self.rx.cq_seq, &self.rx.cntr)
+        transport::check_cntr(&self.rx.cq_seq, &self.rx.cntr)
     }
 
     fn wait_put_all(&mut self) -> Result<(), Error> {
 
-        crate::transport::wait_on_cntr(&mut self.tx.cq_seq, &self.tx.cntr)
+        transport::wait_on_cntr(&mut self.tx.cq_seq, &self.tx.cntr)
     }
 
     fn check_put_all(&self) -> bool {
-        crate::transport::check_cntr(&self.tx.cq_seq, &self.tx.cntr)
+        transport::check_cntr(&self.tx.cq_seq, &self.tx.cntr)
     }
 
     async fn sub_exchange_mr_info(&mut self, addr: u64, key: u64, pes: &[usize]) -> Vec<libfabric::iovec::RmaIoVec> {
@@ -831,10 +792,10 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
         
         // debug_println!("\tP[{}] Creating collective join ctx: {}", self.world.my_id, &mut *mut_ctx as *mut libfabric::Context as usize);
         debug_println!("\tP[{}] Creating collective join", self.world.my_id);
-        let (_, mc) = self.ep.join_collective_async(&address, &av_set, JoinOptions::new()).await.unwrap();
-        // let mc = self.ep.join_collective_with_context(&address, &av_set, JoinOptions::new(), &mut *mut_ctx).unwrap();
+        // let (_, mc) = self.ep.join_collective_async(&address, &av_set, JoinOptions::new()).await.unwrap();
+        let mc = self.ep.join_collective_with_context(&address, &av_set, JoinOptions::new(), &mut *mut_ctx).unwrap();
         // debug_println!("\tP[{}] Waiting collective join {}", self.world.my_id, &*mut_ctx as *const libfabric::Context as usize);
-        // crate::transport::wait_on_event_join(&self.eq, &mut self.tx.cq_cntr, &mut self.rx.cq_cntr, &self.tx.cq, &self.rx.cq, &mut_ctx);
+        transport::wait_on_event_join(&self.eq, &mut self.tx.cq_cntr, &mut self.rx.cq_cntr, &self.tx.cq, &self.rx.cq, &mut_ctx);
         
         // let address = mc.get_addr();
         // debug_println!("\tP[{}] Done creating collective. MC address: {}", self.world.my_id, address);
@@ -846,7 +807,7 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
         
         mc.allgather_async(std::slice::from_mut(&mut rma_iov), &mut libfabric::mr::default_desc(), &mut rma_iovs, &mut libfabric::mr::default_desc(), TferOptions::new()).await.unwrap();
         
-        // crate::transport::wait_on_context_comp(&mut_ctx, &self.tx.cq, &mut self.tx.cq_cntr);
+        // transport::wait_on_context_comp(&mut_ctx, &self.tx.cq, &mut self.tx.cq_cntr);
         
         debug_println!("\tP[{}] Got the following addresses ({}) from all gather:", self.world.my_id,  rma_iovs.len());
         
@@ -865,7 +826,7 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
         self.sub_exchange_mr_info(addr, key, &pes).await
     }
 
-    unsafe fn post_rma_inject(&mut self, rma_op: &RmaOp, remote: &RmaInfo, buf: &[u8], id: usize) { // Unsafe because we write to remote 
+    unsafe fn post_rma_inject(&self, rma_op: &RmaOp, remote: &RmaInfo, buf: &[u8], id: usize) { // Unsafe because we write to remote 
         
         match rma_op {
             
@@ -874,7 +835,9 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
                 let key = remote.key();
                 let remote_address = &self.world.addresses[id];
                 let ep = &self.ep;
-                unsafe{ crate::transport::post!(inject_write, crate::transport::progress, &self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr, "fi_write", ep, buf, remote_address, addr, &key); }
+                let mut cq_cntr = 0; 
+                let mut _cq_seq = 0;
+                unsafe{ crate::transport::post!(inject_write, transport::progress, &self.tx.cq, _cq_seq, &mut cq_cntr, "fi_write", ep, buf, remote_address, addr, &key); }
             }
     
             RmaOp::RmaWriteData => {
@@ -889,21 +852,18 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
                 panic!("post_rma_inject does not support read");
             }
         }
-        self.tx.cq_cntr += 1;
     }
 
-    unsafe fn  post_rma_mut(&mut self, rma_op: &RmaOp, remote: &RmaInfo, buf: &mut [u8], mr_desc: &mut MemoryRegionDesc, id: usize) {
+    async unsafe  fn  post_rma_mut(&mut self, rma_op: &RmaOp, remote: &RmaInfo, buf: &mut [u8], mr_desc: &mut MemoryRegionDesc, id: usize) {
 
         let remote_address = &self.world.addresses[id];
-        let mut bank = self.ctx_bank.borrow_mut();
-        let ctx = bank.create();
 
         match rma_op {
             
             RmaOp::RmaWrite => {
                 let addr = remote.mem_address();
                 let key = remote.key();
-                unsafe{ crate::transport::post!(write_with_context, crate::transport::progress, &self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr, "fi_write", &self.ep, buf, mr_desc, remote_address, addr, &key, &mut *ctx.borrow_mut()); }
+                unsafe{ transport::post!(write_async, &self.ep, buf, mr_desc, remote_address, addr, &key); }
             }
     
             RmaOp::RmaWriteData => {
@@ -919,22 +879,47 @@ impl<I, EQ, CQ, CNTR> Rofi<I, EQ, CQ, CNTR>
             RmaOp::RmaRead => {
                 let addr = remote.mem_address();
                 let key = remote.key();
-                unsafe{ crate::transport::post!(read_with_context, crate::transport::progress, &self.rx.cq, self.rx.cq_seq, &mut self.rx.cq_cntr, "fi_write", &self.ep, buf, mr_desc, remote_address, addr, &key, &mut *ctx.borrow_mut()); }
+                unsafe{ transport::post!(read_async, &self.ep, buf, mr_desc, remote_address, addr, &key); }
             }
         }
     }
 
-    unsafe fn  post_rma(&mut self, rma_op: &RmaOp, remote: &RmaInfo, buf: &[u8], mr_desc: &mut MemoryRegionDesc,  id: usize) {
+    // unsafe fn  post_rma(&mut self, rma_op: &RmaOp, remote: &RmaInfo, buf: &[u8], mr_desc: &mut MemoryRegionDesc,  id: usize) {
+    //     let remote_address = &self.world.addresses[id];
+    //     let mut bank = self.ctx_bank.borrow_mut();
+    //     let ctx = bank.create();
+
+    //     match rma_op {
+            
+    //         RmaOp::RmaWrite => {
+    //             let addr = remote.mem_address();
+    //             let key = remote.key();
+    //             unsafe{ transport::post!(write_with_context, transport::progress, &self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr, "fi_write", &self.ep, buf, mr_desc, remote_address, addr, &key, &mut *ctx.borrow_mut()); }
+    //         }
+    
+    //         RmaOp::RmaWriteData => {
+    //             todo!();
+
+    //             // let addr = remote.get_address() as u64;
+    //             // let remote_address = self.world.addresses[id];
+    //             // let key = remote.get_key();
+    //             // let remote_cq_data = gl_ctx.remote_cq_data;
+    //             // unsafe{ tranport::ft_post!(writedata, tranport::progress, tx_cq, gl_ctx.tx_seq, &mut gl_ctx.tx_cq_cntr, "fi_write", ep, buf, data_desc, remote_cq_data, fi_addr, addr, key); }
+    //         }
+    //         _ => panic!("Cannot use post_rma to read into local buffer. Use post_rma_mut instead")
+    //     }
+    // }
+    
+    async unsafe fn  post_rma(&self, rma_op: &RmaOp, remote: &RmaInfo, buf: &[u8], mr_desc: &mut MemoryRegionDesc,  id: usize) {
         let remote_address = &self.world.addresses[id];
-        let mut bank = self.ctx_bank.borrow_mut();
-        let ctx = bank.create();
 
         match rma_op {
             
             RmaOp::RmaWrite => {
                 let addr = remote.mem_address();
                 let key = remote.key();
-                unsafe{ crate::transport::post!(write_with_context, crate::transport::progress, &self.tx.cq, self.tx.cq_seq, &mut self.tx.cq_cntr, "fi_write", &self.ep, buf, mr_desc, remote_address, addr, &key, &mut *ctx.borrow_mut()); }
+                // let _ = self.ep.write_async(buf, mr_desc, remote_address, addr, &key).await.unwrap();
+                unsafe{ transport::post!(write_async, &self.ep, buf, mr_desc, remote_address, addr, &key); }
             }
     
             RmaOp::RmaWriteData => {
@@ -959,247 +944,215 @@ fn euclid_rem(a: i64, b: i64) -> usize {
 
 #[cfg(test)]
 mod tests {
+    macro_rules! define_test {
+        ($func_name:ident, $async_fname:ident, $body: block) => {
+            
+            // #[cfg(feature= "use-async-std")]
+            #[test]
+            fn $func_name() {
+                async_std::task::block_on(async {$async_fname().await});
+            } 
+            
+            #[cfg(feature= "use-tokio")]
+            #[tokio::test]
+            #[ignore]
+            async fn $func_name() {
+                $async_fname().await;
+            }
+    
+            async fn $async_fname() $body
+        };
+    }
+
     use super::RofiBuilder;
     // use tokio;
 
     // #[tokio::test]
     // async fn init_async() {
-    #[test]
-    fn init_async() {
-        let _rofi = async_std::task::block_on(async {RofiBuilder::new().build().await.unwrap()});
+    define_test!(init, init_async,  {
+        let _rofi = RofiBuilder::new().build().await.unwrap();
         // let _rofi = RofiBuilder::new().build().await.unwrap();
-    }
+    });
     
-    // #[test]
-    // fn alloc() {
-    //     let mut rofi = RofiBuilder::new().build().unwrap();
-    //     let _mem = rofi.alloc(256);
-    //     // async_std::task::block_on(rofi.alloc(256).await)
-    // }
+    define_test!(alloc, alloc_async,  {
+        let mut rofi = RofiBuilder::new().build().await.unwrap();
+        rofi.alloc(256).await;
+    });
     
-    // #[test]
-    // fn sub_alloc() {
-    //     let exclude_id = 1;
-
-    //     const N: usize = 256;
-    //     let mut rofi = RofiBuilder::new().build().unwrap();
-    //     let size = rofi.get_size();
-    //     assert!(size > 2);
+    define_test!(sub_alloc, sub_alloc_async, {
+        let exclude_id = 1;
+        const N: usize = 256;
+        let mut rofi = RofiBuilder::new().build().await.unwrap();
+        let size = rofi.get_size();
+        assert!(size > 2);
         
-    //     if rofi.get_id() != exclude_id {
-    //         let pes: Vec<usize> = (0_usize..size).filter_map(|x| if x != exclude_id {Some(x)} else {None}).collect();
-    //         let pes_len = pes.len();
-    //         let _mem = rofi.sub_alloc(N * pes_len, &pes);
-    //     }
-    // }
+        if rofi.get_id() != exclude_id {
+            let pes: Vec<usize> = (0_usize..size).filter(|x|  x != &exclude_id ).collect();
+            let pes_len = pes.len();
+            let _mem = rofi.sub_alloc(N * pes_len, &pes).await;
+        }
+    });
 
-    // #[test]
-    // fn sub_put() {
-    //     let exclude_id = 1;
+    define_test!(sub_put, sub_put_async, {
+        let exclude_id = 1;
 
-    //     const N: usize = 256;
-    //     let mut rofi = RofiBuilder::new().build().unwrap();
-    //     let my_id = rofi.get_id();
-    //     let size = rofi.get_size();
-    //     assert!(size > 2);
+        const N: usize = 256;
+        let mut rofi = RofiBuilder::new().build().await.unwrap();
+        let my_id = rofi.get_id();
+        let size = rofi.get_size();
+        assert!(size > 2);
         
-    //     if rofi.get_id() != exclude_id {
-    //         let pes: Vec<usize> = (0_usize..size).filter_map(|x| if x != exclude_id {Some(x)} else {None}).collect();
-    //         let me = pes.iter().position(|x| x == &my_id).unwrap();
+        if rofi.get_id() != exclude_id {
+            let pes: Vec<usize> = (0_usize..size).filter(|x| x != &exclude_id).collect();
+            let me = pes.iter().position(|x| x == &my_id).unwrap();
 
-    //         let pes_len = pes.len();
-    //         let send_id = pes[(me + 1) % pes_len];
-    //         let other = if me as i64 - 1 < 0  {pes.len() as i64 - 1} else {me as i64 - 1} as usize;
-    //         let mem = rofi.sub_alloc(N * pes_len, &pes);
-    //         for i in 0..N {
-    //             mem.get_mem().borrow_mut()[me* N + i] = (i % N) as u8;
-    //             mem.get_mem().borrow_mut()[other* N + i] = 5;
-    //         }
-    //         let dst = mem.get_start() + me  *  N;
-    //         unsafe {rofi.put(dst, &mem.get_mem().borrow()[me*N..me*N+N], send_id).unwrap()};
-    //         while mem.get_mem().borrow()[other*N] == 5 {}
-    //         assert_eq!(&mem.get_mem().borrow()[me * N..me * N + N],&mem.get_mem().borrow()[other * N.. other*N + N]);
-    //     }
-    // }
+            let pes_len = pes.len();
+            let send_id = pes[(me + 1) % pes_len];
+            let other = if me as i64 - 1 < 0  {pes.len() as i64 - 1} else {me as i64 - 1} as usize;
+            let mem = rofi.sub_alloc(N * pes_len, &pes).await;
+            for i in 0..N {
+                mem.get_mem().borrow_mut()[me* N + i] = (i % N) as u8;
+                mem.get_mem().borrow_mut()[other* N + i] = 5;
+            }
+            rofi.sub_barrier(&pes).await;
+            let dst = mem.get_start() + me  *  N;
+            unsafe {rofi.put(dst, &mem.get_mem().borrow()[me*N..me*N+N], send_id).await.unwrap()};
+            rofi.sub_barrier(&pes).await; // Make sure everyone has finished putting
+            assert_eq!(&mem.get_mem().borrow()[me * N..me * N + N],&mem.get_mem().borrow()[other * N.. other*N + N]);
+        }
+    });
 
-    // #[test]
-    // fn sub_get() {
-    //     let exclude_id = 1;
+    define_test!(sub_get, sub_get_async, {
+        let exclude_id = 1;
 
-    //     const N: usize = 256;
-    //     let mut rofi = RofiBuilder::new().build().unwrap();
-    //     let my_id = rofi.get_id();
-    //     let size = rofi.get_size();
-    //     assert!(size > 2);
+        const N: usize = 256;
+        let mut rofi = RofiBuilder::new().build().await.unwrap();
+        let my_id = rofi.get_id();
+        let size = rofi.get_size();
+        assert!(size > 2);
         
-    //     if rofi.get_id() != exclude_id {
-    //         let pes: Vec<usize> = (0_usize..size).filter_map(|x| if x != exclude_id {Some(x)} else {None}).collect();
-    //         let me = pes.iter().position(|x| x == &my_id).unwrap();
+        if rofi.get_id() != exclude_id {
+            let pes: Vec<usize> = (0_usize..size).filter(|x| x != &exclude_id).collect();
+            let me = pes.iter().position(|x| x == &my_id).unwrap();
 
-    //         let pes_len = pes.len();
-    //         let recv_id = pes[(me + 1) % pes_len];
-    //         let other = (me + 1) % pes_len;
-    //         let mem = rofi.sub_alloc(N * pes_len, &pes);
-    //         for i in 0..N {
-    //             mem.get_mem().borrow_mut()[me* N + i] = (i % N) as u8;
-    //             mem.get_mem().borrow_mut()[other* N + i] = 5;
-    //         }
-    //         let src = mem.get_start() + other  *  N;
-    //         unsafe {rofi.get(src, &mut mem.get_mem().borrow_mut()[other*N..other*N+N], recv_id).unwrap()};
-    //         while mem.get_mem().borrow()[other*N] == 5 {}
-    //         assert_eq!(&mem.get_mem().borrow()[me * N..me * N + N],&mem.get_mem().borrow()[other * N.. other*N + N]);
-    //     }
-    // }
+            let pes_len = pes.len();
+            let recv_id = pes[(me + 1) % pes_len];
+            let other = (me + 1) % pes_len;
+            let mem = rofi.sub_alloc(N * pes_len, &pes).await;
+            for i in 0..N {
+                mem.get_mem().borrow_mut()[me* N + i] = (i % N) as u8;
+                mem.get_mem().borrow_mut()[other* N + i] = 5;
+            }
+            let src = mem.get_start() + other  *  N;
+            rofi.sub_barrier(&pes).await;
+            unsafe {rofi.get(src, &mut mem.get_mem().borrow_mut()[other*N..other*N+N], recv_id).await.unwrap()};
+            
+            assert_eq!(&mem.get_mem().borrow()[me * N..me * N + N],&mem.get_mem().borrow()[other * N.. other*N + N]);
+            rofi.sub_barrier(&pes).await; // Make sure everyone has finished getting
+        }
+    });
 
-    // #[test]
-    // fn sub_barrier() {
-    //     let exclude_id = 1;
-    //     let mut rofi = RofiBuilder::new().build().unwrap();
-    //     let size = rofi.get_size();
-    //     assert!(size > 2);
+    define_test!(sub_barrier, sub_barrier_async, {
+        let exclude_id = 1;
+        let mut rofi = RofiBuilder::new().build().await.unwrap();
+        let size = rofi.get_size();
+        assert!(size > 2);
 
-    //     if rofi.get_id() != exclude_id {
-    //         let pes: Vec<usize> = (0_usize..size).filter_map(|x| if x != exclude_id {Some(x)} else {None}).collect();
-    //         rofi.sub_barrier(&pes);
-    //     }
-    // }
+        if rofi.get_id() != exclude_id {
+            let pes: Vec<usize> = (0_usize..size).filter(|x| x != &exclude_id).collect();
+            rofi.sub_barrier(&pes).await;
+        }
+    });
 
-    // #[test]
-    // fn put_inject() {
-    //     const N : usize = 1 << 7;
-    //     let mut rofi = RofiBuilder::new().build().unwrap();
-    //     let size = rofi.get_size();
-    //     assert!(size >= 2);
+    define_test!(put_inject, put_inject_async, {
+        const N : usize = 1 << 7;
+        let mut rofi = RofiBuilder::new().build().await.unwrap();
+        let size = rofi.get_size();
+        assert!(size >= 2);
 
-    //     let my_id = rofi.get_id();
-    //     let send_id = (my_id + 1) % size ;
-    //     let recv_id =  if my_id as i64 - 1 < 0 {size as i64 -1 } else { my_id as i64 -1} as usize ;
+        let my_id = rofi.get_id();
+        let send_id = (my_id + 1) % size ;
+        let recv_id =  if my_id as i64 - 1 < 0 {size as i64 -1 } else { my_id as i64 -1} as usize ;
 
-    //     let mem = rofi.alloc( size * N);
+        let mem = rofi.alloc( size * N).await;
 
-    //     for i in 0..N {
-    //         mem.get_mem().borrow_mut()[my_id* N + i] = (i % N) as u8;
-    //     }
+        for i in 0..N {
+            mem.get_mem().borrow_mut()[my_id* N + i] = (i % N) as u8;
+        }
         
-    //     rofi.barrier();
-    //     let ptr =  my_id * N + mem.get_mem().borrow().as_ptr() as usize;
-    //     unsafe { rofi.iput(ptr, &mem.get_mem().borrow()[my_id * N..my_id* N + N ], send_id ) }.unwrap();
+        rofi.barrier().await;
+        let ptr =  my_id * N + mem.get_mem().borrow().as_ptr() as usize;
+        unsafe { rofi.put(ptr, &mem.get_mem().borrow()[my_id * N..my_id* N + N ], send_id ) }.await.unwrap();
         
-    //     rofi.barrier();
+        rofi.barrier().await;
 
-    //     assert_eq!(&mem.get_mem().borrow()[my_id * N..my_id * N + N],&mem.get_mem().borrow()[recv_id * N.. recv_id*N + N]);
-    // }
+        assert_eq!(&mem.get_mem().borrow()[my_id * N..my_id * N + N],&mem.get_mem().borrow()[recv_id * N.. recv_id*N + N]);
+    });
 
 
-    // #[test]
-    // fn put() {
-    //     const N : usize = 1 << 8;
-    //     let mut rofi = RofiBuilder::new().build().unwrap();
-    //     let size = rofi.get_size();
-    //     assert!(size >= 2);
+    define_test!(put, put_async, {
+        const N : usize = 1 << 20;
+        let mut rofi = RofiBuilder::new().build().await.unwrap();
+        let size = rofi.get_size();
+        assert!(size >= 2);
 
-    //     let my_id = rofi.get_id();
-    //     let send_id = (my_id + 1) % size ;
-    //     let recv_id =  if my_id as i64 - 1 < 0 {size as i64 -1 } else { my_id as i64 -1} as usize ;
+        let my_id = rofi.get_id();
+        let send_id = (my_id + 1) % size ;
+        let recv_id =  if my_id as i64 - 1 < 0 {size as i64 -1 } else { my_id as i64 -1} as usize ;
 
-    //     let mem = rofi.alloc(N * size);
+        let mem = rofi.alloc(N * size).await;
 
-    //     for i in 0..N {
-    //         mem.get_mem().borrow_mut()[my_id* N + i] = (i % N) as u8;
-    //         mem.get_mem().borrow_mut()[recv_id* N + i] = 5;
-    //     }
+        for i in 0..N {
+            mem.get_mem().borrow_mut()[my_id* N + i] = (i % N) as u8;
+            mem.get_mem().borrow_mut()[recv_id* N + i] = 5;
+        }
 
-    //     rofi.barrier();
+        rofi.barrier().await;
 
-    //     let ptr =  my_id * N + mem.get_mem().borrow().as_ptr() as usize;
-    //     unsafe { rofi.put(ptr, &mem.get_mem().borrow()[my_id * N..my_id* N + N ], send_id ) }.unwrap();
-    //     rofi.wait_put_all().unwrap();
-    //     // rofi.barrier();
-    //     while mem.get_mem().borrow()[recv_id*N] == 5 {}
+        let ptr =  my_id * N + mem.get_mem().borrow().as_ptr() as usize;
+        {
 
-    //     assert_eq!(&mem.get_mem().borrow()[my_id * N..my_id * N + N],&mem.get_mem().borrow()[recv_id * N.. recv_id*N + N]);
-    // }
+            let target_mem = &mem.get_mem().borrow_mut()[my_id * N..my_id* N + N ];
+            let put0 = unsafe { rofi.put(ptr, target_mem, send_id ) };
+            let put1 = unsafe { rofi.put(ptr, target_mem, send_id ) };
+            let put2 = unsafe { rofi.put(ptr, target_mem, send_id ) };
+            let (r0, r1, r2) = futures::join!(put1, put2, put0);
+            r0.unwrap();
+            r1.unwrap();
+            r2.unwrap();
+        }
 
-    // #[test]
-    // fn put_sync() {
-    //     const N : usize = 1 << 8;
-    //     let mut rofi = RofiBuilder::new().build().unwrap();
-    //     let size = rofi.get_size();
-    //     assert!(size >= 2);
+        rofi.barrier().await; // Make sure everyone has finished putting
 
-    //     let my_id = rofi.get_id();
-    //     let send_id = (my_id + 1) % size ;
-    //     let recv_id =  if my_id as i64 - 1 < 0 {size as i64 -1 } else { my_id as i64 -1} as usize ;
 
-    //     let mem = rofi.alloc(N * size);
+        assert_eq!(&mem.get_mem().borrow()[my_id * N..my_id * N + N],&mem.get_mem().borrow()[recv_id * N.. recv_id*N + N]);
+    });
+  
+    define_test!(get, get_async, {
+        const N : usize = 1 << 7;
+        async_std::task::block_on(async {
+            let mut rofi = RofiBuilder::new().build().await.unwrap();
+            let size = rofi.get_size();
+            assert!(size >= 2);
 
-    //     for i in 0..N {
-    //         mem.get_mem().borrow_mut()[my_id* N + i] = (i % N) as u8;
-    //         mem.get_mem().borrow_mut()[recv_id* N + i] = 5;
-    //     }
+            let my_id = rofi.get_id();
+            let recv_id = (my_id + 1) % size ;
 
-    //     rofi.barrier();
+            let mem = rofi.alloc(N* rofi.get_size()).await;
 
-    //     let ptr =  my_id * N + mem.get_mem().borrow().as_ptr() as usize;
-    //     unsafe { rofi.iput(ptr, &mem.get_mem().borrow()[my_id * N..my_id* N + N ], send_id ) }.unwrap();
-
-    //     rofi.barrier();
-    //     assert_eq!(&mem.get_mem().borrow()[my_id * N..my_id * N + N],&mem.get_mem().borrow()[recv_id * N.. recv_id*N + N]);
-    // }
-
-    // #[test]
-    // fn get_sync() {
-    //     const N : usize = 1 << 7;
-    //     let mut rofi = RofiBuilder::new().build().unwrap();
-    //     let size = rofi.get_size();
-    //     assert!(size >= 2);
-
-    //     let my_id = rofi.get_id();
-    //     let recv_id = (my_id + 1) % size ;
-
-    //     let mem = rofi.alloc(N* rofi.get_size());
-
-    //     for i in 0..N {
-    //         mem.get_mem().borrow_mut()[my_id* N + i] = (i % N) as u8;
-    //         mem.get_mem().borrow_mut()[recv_id* N + i] = 255;
-    //     }
-
-    //     rofi.barrier();
-
-    //     let ptr =  recv_id*N + mem.get_mem().borrow().as_ptr() as usize;
-    //     unsafe { rofi.iget(ptr, &mut mem.get_mem().borrow_mut()[recv_id * N..recv_id* N + N ], recv_id ) }.unwrap();
-
-    //     rofi.barrier();
-
-    //     assert_eq!(&mem.get_mem().borrow()[my_id * N..my_id * N + N],&mem.get_mem().borrow()[recv_id * N.. recv_id*N + N]);
-    // }
-
-    
-    // #[test]
-    // fn get() {
-    //     const N : usize = 1 << 7;
-    //     let mut rofi = RofiBuilder::new().build().unwrap();
-    //     let size = rofi.get_size();
-    //     assert!(size >= 2);
-
-    //     let my_id = rofi.get_id();
-    //     let recv_id = (my_id + 1) % size ;
-
-    //     let mem = rofi.alloc(N* rofi.get_size());
-
-    //     for i in 0..N {
-    //         mem.get_mem().borrow_mut()[my_id * N + i] = (i % N) as u8;
-    //         mem.get_mem().borrow_mut()[recv_id * N + i] = 255;
-    //     }
-    //     rofi.barrier();
-        
-    //     let ptr =  recv_id*N + mem.get_mem().borrow().as_ptr() as usize;
-    //     unsafe { rofi.get(ptr, &mut mem.get_mem().borrow_mut()[recv_id * N..recv_id* N + N ], recv_id ) }.unwrap();
-        
-    //     rofi.barrier();
-    //     while mem.get_mem().borrow()[recv_id*N] == 255 {}
-    //     assert_eq!(&mem.get_mem().borrow()[my_id * N..my_id * N + N],&mem.get_mem().borrow()[recv_id * N.. recv_id*N + N]);
-    // }
+            for i in 0..N {
+                mem.get_mem().borrow_mut()[my_id * N + i] = (i % N) as u8;
+                mem.get_mem().borrow_mut()[recv_id * N + i] = 255;
+            }
+            rofi.barrier().await;
+            
+            let ptr =  recv_id*N + mem.get_mem().borrow().as_ptr() as usize;
+            unsafe { rofi.get(ptr, &mut mem.get_mem().borrow_mut()[recv_id * N..recv_id* N + N ], recv_id ) }.await.unwrap();
+            
+            rofi.barrier().await; // Make sure all PEs have finished reading from remote
+            assert_eq!(&mem.get_mem().borrow()[my_id * N..my_id * N + N],&mem.get_mem().borrow()[recv_id * N.. recv_id*N + N]);
+        });
+    });
 
 
 }

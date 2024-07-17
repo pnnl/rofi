@@ -83,7 +83,13 @@ pub(crate) fn progress(cq: &impl CompletionQueueImplT, _total: u64, cq_cntr: &mu
         },
         Err(ref err) => {
             if !matches!(err.kind, libfabric::error::ErrorKind::TryAgain) {
-                ret.unwrap();
+                match &err.kind {
+                    libfabric::error::ErrorKind::ErrorAvailable => {
+                        panic!("Completion error {}", cq.readerr(0).unwrap().error());
+                    }
+                    _=> {ret.unwrap();},
+                }
+
             }
         }
     }
@@ -276,21 +282,30 @@ pub fn info_to_mr_attr<'a, 'b, I: Caps>(info: &'a InfoEntry<I>, domain: &'a Doma
 }
 
 macro_rules!  post{
-    ($post_fn:ident, $prog_fn:expr, $cq:expr, $seq:expr, $cq_cntr:expr, $op_str:literal, $ep:expr, $( $x:expr),* ) => {
+    ($post_fn:ident, $ep:expr, $( $x:expr),* ) => {
         loop {
-            let ret = $ep.$post_fn($($x,)*);
+            let ret = $ep.$post_fn($($x,)*).await;
             if ret.is_ok() {
                 break;
             }
             else if let Err(ref err) = ret {
                 if !matches!(err.kind, libfabric::error::ErrorKind::TryAgain) {
-                    panic!("Unexepcted error in post_rma ");
+                    match &err.kind {
+                        ErrorInQueue(e) => {
+                            match e {
+                                libfabric::error::QueueError::Completion(entry) => {
+                                    panic!("Completion erro {}", entry.error())
+                                }
+                                _ => todo!()
+                            }
+                        },
+                        _ => {ret.unwrap();},
+                    }
+                    panic!("Unexpected error in post_rma ");
                 }
 
             }
-            $prog_fn($cq, $seq, $cq_cntr);
         }
-        $seq+=1;
     };
 }
 
