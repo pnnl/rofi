@@ -6,21 +6,18 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-pmix-sys = {path = "../pmix-sys/", optional = true, default-features = false}
-pmi2-sys = {path = "../pmi2-sys/", optional = true, default-features = false}
-libfabric = {path = "../libfabric/", default-features = false}
-pmi-sys = {path = "../pmi-sys/", optional = true, default-features = false}
+# pmix-sys = {path = "../pmix-sys/", optional = true, default-features = false}
+# pmi2-sys = {path = "../pmi2-sys/", optional = true, default-features = false}
+libfabric = {path = "../libfabric/", features = ["thread-safe"]}
+pmi = {path = "/people/thom895/rofi/pmi/"}
 page_size= "0.6.0" 
 memmap = "0.7.0"
 debug_print = "1.0.0"
+parking_lot = "0.12.3"
 async-std = {version = "1.12.0", optional = true}
 async-io = {version = "2.3.2", optional = true}
-tokio = {version = "1.38", optional = true}
+# tokio = {version = "1.38", optional = true}
 futures = "*"
 [features]
-async-ofi = ["libfabric/use-async-std", "async-std", "async-io"]
-async-rofi = ["async-std", "async-io"]
-default = ["with-pmi1", "async-ofi"]
-with-pmix = ["dep:pmix-sys"] 
-with-pmi2 = ["dep:pmi2-sys"] 
-with-pmi1 = ["dep:pmi-sys"]
+# async-ofi = ["libfabric/use-async-std"]
+async-rofi = ["libfabric/use-async-std", "async-std", "async-io"]
