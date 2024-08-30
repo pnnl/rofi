@@ -5,8 +5,7 @@ use libfabric::cntr::WaitCntr;
 use ep::{ActiveEndpoint, BaseEndpoint};
 use libfabric::*;
 use pmi::pmi::Pmi;
-use std::{collections::HashMap, rc::Rc, sync::{atomic::{AtomicBool, AtomicUsize, Ordering}}};
-use parking_lot::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{AllocInfo, AllocInfoManager, BarrierImpl, RemoteAllocInfo};
 
@@ -586,19 +585,19 @@ impl Ofi {
         Ok(())
     }
 
-    pub(crate) fn local_addr(&self, remote_pe: &usize, remote_addr: &usize) -> usize {
+    pub fn local_addr(&self, remote_pe: &usize, remote_addr: &usize) -> usize {
         self.alloc_manager
             .local_addr(remote_pe, remote_addr)
             .expect(&format!("Local address not found from remote PE {}, remote addr: {}", remote_pe, remote_addr))
     }
 
-    pub(crate) fn remote_addr(&self, pe: &usize, local_addr: &usize) -> usize {
+    pub fn remote_addr(&self, pe: &usize, local_addr: &usize) -> usize {
         self.alloc_manager
             .remote_addr(pe, local_addr)
             .expect(&format!("Remote address not found for PE {}", pe))
     }
 
-    pub(crate) fn release(&self, addr: &usize) {
+    pub fn release(&self, addr: &usize) {
         self.alloc_manager.remove(addr);
     }
 
