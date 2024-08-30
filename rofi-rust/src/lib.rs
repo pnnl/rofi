@@ -7,6 +7,7 @@ use parking_lot::RwLock;
 // mod context;
 // mod transport;
 pub mod rofi;
+#[cfg(feature="async-rofi")]
 pub mod async_;
 
 #[derive(Debug)]

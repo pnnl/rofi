@@ -625,13 +625,13 @@ mod tests {
 
     #[test]
     fn init() {
-        let mut rofi = Ofi::new(Some("verbs"), None).unwrap();
+        let _rofi = Ofi::new(Some("verbs"), None).unwrap();
         // rofi.init_barrier().unwrap();
     }
     
     #[test]
     fn alloc() {
-        let mut rofi = Ofi::new(Some("verbs"), None).unwrap();
+        let rofi = Ofi::new(Some("verbs"), None).unwrap();
         // rofi.init_barrier().unwrap();
         let pes: Vec<_> = (0..rofi.num_pes).collect();
         let _mem = rofi.sub_alloc( &pes, 256);
@@ -643,7 +643,7 @@ mod tests {
         let mut exclude_id = 1;
 
         const N: usize = 256;
-        let mut rofi = Ofi::new(Some("verbs"), None).unwrap();
+        let rofi = Ofi::new(Some("verbs"), None).unwrap();
         // rofi.init_barrier().unwrap();
         let size = rofi.num_pes;
         assert!(size > 2);
@@ -669,7 +669,7 @@ mod tests {
         let exclude_id = 1;
 
         const N: usize = 256;
-        let mut rofi = Ofi::new(Some("verbs"), None).unwrap();
+        let rofi = Ofi::new(Some("verbs"), None).unwrap();
         // rofi.init_barrier().unwrap();
         let size = rofi.num_pes;
         let my_id = rofi.my_pe;
@@ -702,7 +702,7 @@ mod tests {
         let exclude_id = 1;
 
         const N: usize = 256;
-        let mut rofi = Ofi::new(Some("verbs"), None).unwrap();
+        let rofi = Ofi::new(Some("verbs"), None).unwrap();
         // rofi.init_barrier().unwrap();
         let size = rofi.num_pes;
         let my_id = rofi.my_pe;
@@ -733,10 +733,9 @@ mod tests {
     #[test]
     fn sub_barrier() {
         let exclude_id = 1;
-        let mut rofi = Ofi::new(Some("verbs"), None).unwrap();
+        let rofi = Ofi::new(Some("verbs"), None).unwrap();
         // rofi.init_barrier().unwrap();
         let size = rofi.num_pes;
-        let my_id = rofi.my_pe;
         assert!(size > 2);
 
         if rofi.my_pe != exclude_id {
@@ -748,10 +747,9 @@ mod tests {
     #[test]
     fn put_inject() {
         const N : usize = 1 << 7;
-        let mut rofi = Ofi::new(Some("verbs"), None).unwrap();
+        let rofi = Ofi::new(Some("verbs"), None).unwrap();
         // rofi.init_barrier().unwrap();
         let size = rofi.num_pes;
-        let my_id = rofi.my_pe;
         assert!(size >= 2);
         let pes: Vec<_> = (0..rofi.num_pes).collect();
         let my_id = rofi.my_pe;
@@ -777,7 +775,7 @@ mod tests {
     #[test]
     fn put() {
         const N : usize = 1 << 8;
-        let mut rofi = Ofi::new(Some("verbs"), None).unwrap();
+        let rofi = Ofi::new(Some("verbs"), None).unwrap();
         // rofi.init_barrier().unwrap();
         let size = rofi.num_pes;
         let my_id = rofi.my_pe;
@@ -810,7 +808,7 @@ mod tests {
     #[test]
     fn put_sync() {
         const N : usize = 1 << 8;
-        let mut rofi = Ofi::new(Some("verbs"), None).unwrap();
+        let rofi = Ofi::new(Some("verbs"), None).unwrap();
         // rofi.init_barrier().unwrap();
         let size = rofi.num_pes;
         let my_id = rofi.my_pe;
@@ -840,7 +838,7 @@ mod tests {
     #[test]
     fn get_sync() {
         const N : usize = 1 << 7;
-        let mut rofi = Ofi::new(Some("verbs"), None).unwrap();
+        let rofi = Ofi::new(Some("verbs"), None).unwrap();
         // rofi.init_barrier().unwrap();
         let size = rofi.num_pes;
         let my_id = rofi.my_pe;
@@ -871,7 +869,7 @@ mod tests {
     #[test]
     fn get() {
         const N : usize = 1 << 7;
-        let mut rofi = Ofi::new(Some("verbs"), None).unwrap();
+        let rofi = Ofi::new(Some("verbs"), None).unwrap();
         // rofi.init_barrier().unwrap();
         let size = rofi.num_pes;
         let my_id = rofi.my_pe;

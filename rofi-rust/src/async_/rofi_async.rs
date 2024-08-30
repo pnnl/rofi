@@ -24,7 +24,7 @@ pub type CqOptDefault =  libfabric::async_cq_caps_type!();
 pub type CntrOptDefault = libfabric::cntr_caps_type!(CntrCaps::WAIT);
 
 macro_rules!  post_async{
-    ($post_fn:ident, $ep:expr, $( $x:expr),* ) => {
+    ($post_fn:ident, $self: ident, $progress: ident, $ep:expr, $( $x:expr),* ) => {
         loop {
             let ret = $ep.$post_fn($($x,)*).await;
             if ret.is_ok() {
@@ -45,8 +45,9 @@ macro_rules!  post_async{
                     }
                     panic!("Unexpected error in post_rma ");
                 }
-
             }
+
+            $self.$progress().unwrap()
         }
     };
 }
@@ -162,7 +163,7 @@ impl Ofi {
             .remote_read()
             .cntr(&get_cntr)?;
         
-        ep.bind_shared_cq(&cq, true)?;
+        ep.bind_shared_cq(&cq)?;
 
         ep.bind_eq(&eq)?;
 
@@ -470,7 +471,6 @@ impl Ofi {
             }
             BarrierImpl::Uninit => panic!("Barrier is not initialized"),
             BarrierImpl::Collective(mc) => {
-                // let mut ctx = self.info_entry.allocate_context();
                 self.ep.barrier_async(mc).await.unwrap();
             },
         }
@@ -543,7 +543,7 @@ impl Ofi {
             let mut cntr_order = 0;
             while curr_idx < src_addr.len() {
                 let msg_len = std::cmp::min(src_addr.len() - curr_idx, self.info_entry.ep_attr().max_msg_size()); 
-                post_async!(write_to_async, self.ep, &src_addr[curr_idx..curr_idx+msg_len], &mut desc, &self.mapped_addresses[pe], remote_dst_addr as u64, remote_key);
+                post_async!(write_to_async, self, progress, self.ep, &src_addr[curr_idx..curr_idx+msg_len], &mut desc, &self.mapped_addresses[pe], remote_dst_addr as u64, remote_key);
                 let order = self.put_cnt.fetch_add(1, Ordering::SeqCst) + 1;
               
                 remote_dst_addr += msg_len;
@@ -554,10 +554,7 @@ impl Ofi {
             cntr_order
         };
 
-        // if sync {
         self.wait_for_tx_cntr(cntr_order)?;
-        // }        
-        println!("Done putting");
         Ok(())
     } 
 
@@ -612,7 +609,7 @@ impl Ofi {
         let mut cntr_order = 0;
         while curr_idx < dst_addr.len() {
             let msg_len = std::cmp::min(dst_addr.len() - curr_idx,  self.info_entry.ep_attr().max_msg_size());
-            post_async!(read_from_async, self.ep, &mut dst_addr[curr_idx..curr_idx+msg_len], &mut desc, &self.mapped_addresses[pe], remote_src_addr as u64, remote_key);
+            post_async!(read_from_async, self, progress, self.ep, &mut dst_addr[curr_idx..curr_idx+msg_len], &mut desc, &self.mapped_addresses[pe], remote_src_addr as u64, remote_key);
             let order = self.get_cnt.fetch_add(1, Ordering::SeqCst) + 1;
             remote_src_addr += msg_len;
             curr_idx += msg_len;
@@ -740,13 +737,13 @@ mod tests {
     macro_rules! define_test {
         ($func_name:ident, $async_fname:ident, $body: block) => {
             
-            // #[cfg(feature= "use-async-std")]
+            #[cfg(feature= "async-rofi")]
             #[test]
             fn $func_name() {
                 block_on(async {$async_fname().await});
             } 
             
-            #[cfg(feature= "use-tokio")]
+            #[cfg(feature= "async-rofi-tokio")]
             #[tokio::test]
             #[ignore]
             async fn $func_name() {
@@ -766,13 +763,13 @@ mod tests {
     
     define_test!(alloc, alloc_async,  {
         let mut rofi =  Ofi::new(Some("verbs"), None).unwrap();
-        rofi.alloc(256).await;
+        rofi.alloc(256).await.unwrap();
     });
     
     define_test!(sub_alloc, sub_alloc_async, {
         let exclude_id = 1;
         const N: usize = 256;
-        let mut rofi =  Ofi::new(Some("verbs"), None).unwrap();
+        let rofi =  Ofi::new(Some("verbs"), None).unwrap();
         let size = rofi.num_pes;
         assert!(size > 2);
         
