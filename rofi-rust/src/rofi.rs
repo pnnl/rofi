@@ -22,8 +22,8 @@ type WaitableCntr = libfabric::cntr_caps_type!(CntrCaps::WAIT);
 type RmaAtomicCollEp = libfabric::info_caps_type!(FabInfoCaps::ATOMIC, FabInfoCaps::RMA, FabInfoCaps::COLL);
 
 pub struct Ofi {
-    pub(crate) num_pes: usize,
-    pub(crate) my_pe: usize,
+    pub num_pes: usize,
+    pub my_pe: usize,
     mapped_addresses: Vec<libfabric::MappedAddress>,
     barrier_impl: BarrierImpl,
     ep: libfabric::ep::Endpoint<RmaAtomicCollEp>,
@@ -40,7 +40,8 @@ pub struct Ofi {
     put_cnt: AtomicUsize,
     get_cnt: AtomicUsize,
 }
-
+unsafe impl Sync for Ofi {}
+unsafe impl Send for Ofi {}
 impl Ofi {
     pub fn new(provider: Option<&str>, domain: Option<&str>) -> Result<Self, libfabric::error::Error> {
         let my_pmi = pmi::pmi1::Pmi1::new().unwrap();
@@ -224,7 +225,7 @@ impl Ofi {
         }
     }
 
-    pub(crate) fn progress(&self) -> Result<(), libfabric::error::Error> {
+    pub fn progress(&self) -> Result<(), libfabric::error::Error> {
 
         let cq_res = self.cq.read(0);
 
@@ -473,7 +474,17 @@ impl Ofi {
             },
             BarrierImpl::Collective(mc) => {
                 let mut ctx = self.info_entry.allocate_context();
-                self.ep.barrier_with_context(mc, &mut ctx)?;
+                loop {
+                    let ret = self.ep.barrier_with_context(mc, &mut ctx);
+                    match &ret {
+                        Ok(_) => {break},
+                        Err(err) => {
+                            if !matches!(err.kind, libfabric::error::ErrorKind::TryAgain) {
+                                return ret;
+                            }
+                        }
+                    }
+                }
                 self.wait_for_completion(&ctx)?;
                 println!("Done with barrier");
                 Ok(())

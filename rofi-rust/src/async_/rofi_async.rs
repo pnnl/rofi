@@ -54,8 +54,8 @@ macro_rules!  post_async{
 
 #[allow(dead_code)]
 pub struct Ofi {
-    pub(crate) num_pes: usize,
-    pub(crate) my_pe: usize,
+    pub num_pes: usize,
+    pub my_pe: usize,
     mapped_addresses: Vec<libfabric::MappedAddress>,
     barrier_impl: BarrierImpl,
     ep: libfabric::async_::ep::Endpoint<RmaAtomicCollEp>,
@@ -72,7 +72,8 @@ pub struct Ofi {
     put_cnt: AtomicUsize,
     get_cnt: AtomicUsize,
 }
-
+unsafe impl Sync for Ofi {}
+unsafe impl Send for Ofi {}
 impl Ofi {
     pub fn new(provider: Option<&str>, domain: Option<&str>) -> Result<Self, libfabric::error::Error> {
         let my_pmi = pmi::pmi1::Pmi1::new().unwrap();
@@ -278,7 +279,7 @@ impl Ofi {
         }
     }
 
-    pub(crate) fn progress(&self) -> Result<(), libfabric::error::Error> {
+    pub fn progress(&self) -> Result<(), libfabric::error::Error> {
 
         let cq_res = self.cq.read(0);
 
@@ -380,7 +381,9 @@ impl Ofi {
             .expect(&format!("Remote address not found for PE {}", pe))
     }
 
-
+    pub fn release(&self, addr: &usize) {
+        self.alloc_manager.remove(addr);
+    }
     // /// Flush all completion queue events from previous communication calls, ensuring progress.
     // /// 
     // /// # Examples
