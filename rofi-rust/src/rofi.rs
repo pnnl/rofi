@@ -36,7 +36,7 @@ pub struct Ofi {
     _fabric: libfabric::fabric::Fabric,
     info_entry: libfabric::info::InfoEntry<RmaAtomicCollEp>,
     alloc_manager: AllocInfoManager,
-    _my_pmi: pmi::pmi1::Pmi1,
+    _my_pmi: Box<dyn Pmi>,
     put_cnt: AtomicUsize,
     get_cnt: AtomicUsize,
 }
@@ -160,7 +160,7 @@ impl Ofi {
         let mut ofi = Self {
             num_pes: my_pmi.ranks().len(),
             my_pe: my_pmi.rank(),
-            _my_pmi: my_pmi,
+            _my_pmi: Box::new(my_pmi),
             info_entry, 
             _fabric: fabric,
             domain,

@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 # pmix-sys = {path = "../pmix-sys/", optional = true, default-features = false}
 # pmi2-sys = {path = "../pmi2-sys/", optional = true, default-features = false}
-libfabric = {path = "../libfabric/"}
+libfabric = {git="https://github.com/pnnl/rofi.git", branch = "libfabric-async", features = ["use-async-std"]}
 pmi = {path = "/people/thom895/rofi/pmi/"}
 page_size= "0.6.0" 
 memmap = "0.7.0"
