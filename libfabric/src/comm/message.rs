@@ -3,7 +3,7 @@ use crate::{
     connless_ep::ConnlessEp,
     cq::ReadCq,
     enums::{RecvMsgOptions, SendMsgOptions},
-    ep::{Connected, Connectionless, EndpointBase, EndpointImplBase},
+    ep::{Connected, Connectionless, EndpointBase, EndpointImplBase, EpMrReq},
     eq::ReadEq,
     fid::{AsRawTypedFid, EpRawFid},
     infocapsoptions::{MsgCap, RecvMod, SendMod},
@@ -427,8 +427,8 @@ impl<EP: MsgCap + RecvMod, EQ: ?Sized, CQ: ?Sized + ReadCq> RecvEpImpl
 }
 
 // impl<E: MsgCap + RecvMod, EQ: ?Sized + ReadEq, CQ: ?Sized + ReadCq> EndpointBase<E> {
-impl<E: RecvEpImpl> RecvEpImpl for EndpointBase<E, Connected> {}
-impl<E: RecvEpImpl> RecvEpImpl for EndpointBase<E, Connectionless> {}
+impl<E: RecvEpImpl, MRREQ: EpMrReq> RecvEpImpl for EndpointBase<E, Connected, MRREQ> {}
+impl<E: RecvEpImpl, MRREQ: EpMrReq> RecvEpImpl for EndpointBase<E, Connectionless, MRREQ> {}
 
 pub(crate) trait SendEpImpl: AsRawTypedFid<Output = EpRawFid> {
     fn sendv_impl(
@@ -961,8 +961,8 @@ impl<EP: MsgCap + SendMod, EQ: ?Sized + ReadEq, CQ: ?Sized + ReadCq> SendEpImpl
     for EndpointImplBase<EP, EQ, CQ>
 {
 }
-impl<E: SendEpImpl> SendEpImpl for EndpointBase<E, Connected> {}
-impl<E: SendEpImpl> SendEpImpl for EndpointBase<E, Connectionless> {}
+impl<E: SendEpImpl, MRREQ: EpMrReq> SendEpImpl for EndpointBase<E, Connected, MRREQ> {}
+impl<E: SendEpImpl, MRREQ: EpMrReq> SendEpImpl for EndpointBase<E, Connectionless, MRREQ> {}
 
 impl<CQ: ?Sized + ReadCq> SendEpImpl for TxContextBase<CQ> {}
 impl<CQ: ?Sized + ReadCq> SendEpImpl for TxContextImplBase<CQ> {}

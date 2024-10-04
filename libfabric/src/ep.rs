@@ -72,10 +72,10 @@ pub struct EndpointImplBase<T, EQ: ?Sized, CQ: ?Sized> {
     _bound_av: MyOnceCell<MyRc<dyn AsRawFid>>,
     _domain_rc: MyRc<dyn DomainImplT>,
     phantom: PhantomData<T>,
+    pub(crate) shutdown: bool,
+    pub(crate) mr_local: bool,
+    pub(crate) mr_collective: bool,
 }
-
-// pub type Endpoint<T, STATE: EpState> =
-//     EndpointBase<EndpointImplBase<T, dyn ReadEq, dyn ReadCq>, STATE>;
 
 pub trait EpState {}
 pub struct Connected;
@@ -84,15 +84,27 @@ pub struct UninitUnconnected;
 pub struct Connectionless;
 pub struct UninitConnectionless;
 
+pub trait EpMrReq {}
+pub struct MrNone;
+pub struct MrLocal;
+pub struct MrCollective;
+pub struct MrLocalCollective;
+
 impl EpState for Connected {}
 impl EpState for Unconnected {}
 impl EpState for UninitUnconnected {}
 impl EpState for Connectionless {}
 impl EpState for UninitConnectionless {}
 
-pub struct EndpointBase<EP, STATE: EpState> {
+impl EpMrReq for MrNone {}
+impl EpMrReq for MrLocal {}
+impl EpMrReq for MrCollective {}
+impl EpMrReq for MrLocalCollective {}
+
+pub struct EndpointBase<EP, STATE: EpState, MRREQ: EpMrReq> {
     pub(crate) inner: MyRc<EP>,
-    pub(crate) phantom: PhantomData<STATE>,
+    pub(crate) phantom_ep_state: PhantomData<STATE>,
+    pub(crate) phantom_mr_req: PhantomData<MRREQ>,
 }
 
 // pub(crate) trait BaseEndpointImpl: AsRawTypedFid<Output = EpRawFid> {
@@ -358,13 +370,19 @@ pub trait BaseEndpoint: AsRawFid {
 }
 
 impl<T, EQ: ?Sized + ReadEq, CQ: ?Sized + ReadCq> BaseEndpoint for EndpointImplBase<T, EQ, CQ> {}
-impl<T: BaseEndpoint, STATE: EpState> BaseEndpoint for EndpointBase<T, STATE> {}
+impl<T: BaseEndpoint, STATE: EpState, MRREQ: EpMrReq> BaseEndpoint
+    for EndpointBase<T, STATE, MRREQ>
+{
+}
 
 impl<T, EQ: ?Sized + ReadEq, CQ: ?Sized + ReadCq> ActiveEndpoint for EndpointImplBase<T, EQ, CQ> {}
 
-impl<T: ActiveEndpoint, STATE: EpState> ActiveEndpoint for EndpointBase<T, STATE> {}
+impl<T: ActiveEndpoint, STATE: EpState, MRREQ: EpMrReq> ActiveEndpoint
+    for EndpointBase<T, STATE, MRREQ>
+{
+}
 
-impl<E: AsFd, STATE: EpState> AsFd for EndpointBase<E, STATE> {
+impl<E: AsFd, STATE: EpState, MRREQ: EpMrReq> AsFd for EndpointBase<E, STATE, MRREQ> {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.inner.as_fd()
     }
@@ -858,6 +876,9 @@ impl<T, EQ: ?Sized + ReadEq, CQ: ?Sized + ReadCq> EndpointImplBase<T, EQ, CQ> {
         info: &InfoEntry<E>,
         flags: u64,
         context: *mut std::ffi::c_void,
+        shutdown: bool,
+        mr_local: bool,
+        mr_collective: bool,
     ) -> Result<Self, crate::error::Error> {
         let mut c_ep: EpRawFid = std::ptr::null_mut();
         let err = unsafe {
@@ -883,12 +904,17 @@ impl<T, EQ: ?Sized + ReadEq, CQ: ?Sized + ReadCq> EndpointImplBase<T, EQ, CQ> {
                 eq: MyOnceCell::new(),
                 _domain_rc: domain.clone(),
                 phantom: PhantomData,
+                shutdown,
+                mr_local,
+                mr_collective,
             })
         }
     }
 }
 
-impl EndpointBase<EndpointImplBase<(), dyn ReadEq, dyn ReadCq>, UninitConnectionless> {
+impl<MRREQ: EpMrReq>
+    EndpointBase<EndpointImplBase<(), dyn ReadEq, dyn ReadCq>, UninitConnectionless, MRREQ>
+{
     #[allow(clippy::type_complexity)]
     pub fn new<E, DEQ: ?Sized + 'static>(
         domain: &crate::domain::DomainBase<DEQ>,
@@ -896,7 +922,7 @@ impl EndpointBase<EndpointImplBase<(), dyn ReadEq, dyn ReadCq>, UninitConnection
         flags: u64,
         context: Option<&mut Context>,
     ) -> Result<
-        EndpointBase<EndpointImplBase<E, dyn ReadEq, dyn ReadCq>, UninitConnectionless>,
+        EndpointBase<EndpointImplBase<E, dyn ReadEq, dyn ReadCq>, UninitConnectionless, MRREQ>,
         crate::error::Error,
     > {
         let c_void = match context {
@@ -905,15 +931,30 @@ impl EndpointBase<EndpointImplBase<(), dyn ReadEq, dyn ReadCq>, UninitConnection
         };
 
         Ok(
-            EndpointBase::<EndpointImplBase<E, dyn ReadEq, dyn ReadCq>, UninitConnectionless> {
-                inner: MyRc::new(EndpointImplBase::new(&domain.inner, info, flags, c_void)?),
-                phantom: PhantomData,
+            EndpointBase::<
+                EndpointImplBase<E, dyn ReadEq, dyn ReadCq>,
+                UninitConnectionless,
+                MRREQ,
+            > {
+                inner: MyRc::new(EndpointImplBase::new(
+                    &domain.inner,
+                    info,
+                    flags,
+                    c_void,
+                    false,
+                    info.domain_attr().mr_mode().is_local(),
+                    info.domain_attr().mr_mode().is_collective(),
+                )?),
+                phantom_ep_state: PhantomData,
+                phantom_mr_req: PhantomData,
             },
         )
     }
 }
 
-impl EndpointBase<EndpointImplBase<(), dyn ReadEq, dyn ReadCq>, UninitUnconnected> {
+impl<MRREQ: EpMrReq>
+    EndpointBase<EndpointImplBase<(), dyn ReadEq, dyn ReadCq>, UninitUnconnected, MRREQ>
+{
     #[allow(clippy::type_complexity)]
     pub fn new<E, DEQ: ?Sized + 'static>(
         domain: &crate::domain::DomainBase<DEQ>,
@@ -921,7 +962,7 @@ impl EndpointBase<EndpointImplBase<(), dyn ReadEq, dyn ReadCq>, UninitUnconnecte
         flags: u64,
         context: Option<&mut Context>,
     ) -> Result<
-        EndpointBase<EndpointImplBase<E, dyn ReadEq, dyn ReadCq>, UninitUnconnected>,
+        EndpointBase<EndpointImplBase<E, dyn ReadEq, dyn ReadCq>, UninitUnconnected, MRREQ>,
         crate::error::Error,
     > {
         let c_void = match context {
@@ -930,9 +971,18 @@ impl EndpointBase<EndpointImplBase<(), dyn ReadEq, dyn ReadCq>, UninitUnconnecte
         };
 
         Ok(
-            EndpointBase::<EndpointImplBase<E, dyn ReadEq, dyn ReadCq>, UninitUnconnected> {
-                inner: MyRc::new(EndpointImplBase::new(&domain.inner, info, flags, c_void)?),
-                phantom: PhantomData,
+            EndpointBase::<EndpointImplBase<E, dyn ReadEq, dyn ReadCq>, UninitUnconnected, MRREQ> {
+                inner: MyRc::new(EndpointImplBase::new(
+                    &domain.inner,
+                    info,
+                    flags,
+                    c_void,
+                    true,
+                    info.domain_attr().mr_mode().is_local(),
+                    info.domain_attr().mr_mode().is_collective(),
+                )?),
+                phantom_ep_state: PhantomData,
+                phantom_mr_req: PhantomData,
             },
         )
     }
@@ -1082,32 +1132,34 @@ impl<EP, EQ: ?Sized + AsRawFid + 'static + ReadEq, CQ: ?Sized + ReadCq>
         self.bind_av_(&av.inner, 0)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn alias(&self, flags: u64) -> Result<Self, crate::error::Error> {
-        let mut c_ep: EpRawFid = std::ptr::null_mut();
-        let err = unsafe {
-            libfabric_sys::inlined_fi_ep_alias(self.as_raw_typed_fid(), &mut c_ep, flags)
-        };
+    // #[allow(dead_code)]
+    // pub(crate) fn alias(&self, flags: u64) -> Result<Self, crate::error::Error> {
+    //     let mut c_ep: EpRawFid = std::ptr::null_mut();
+    //     let err = unsafe {
+    //         libfabric_sys::inlined_fi_ep_alias(self.as_raw_typed_fid(), &mut c_ep, flags)
+    //     };
 
-        if err != 0 {
-            Err(crate::error::Error::from_err_code(
-                (-err).try_into().unwrap(),
-            ))
-        } else {
-            Ok(Self {
-                c_ep: OwnedEpFid::from(c_ep),
-                _bound_av: MyOnceCell::new(),
-                _bound_cntrs: MyRefCell::new(Vec::new()),
-                cq: MyOnceCell::new(),
-                eq: MyOnceCell::new(),
-                _domain_rc: self._domain_rc.clone(),
-                phantom: PhantomData,
-            })
-        }
-    }
+    //     if err != 0 {
+    //         Err(crate::error::Error::from_err_code(
+    //             (-err).try_into().unwrap(),
+    //         ))
+    //     } else {
+    //         Ok(Self {
+    //             c_ep: OwnedEpFid::from(c_ep),
+    //             _bound_av: MyOnceCell::new(),
+    //             _bound_cntrs: MyRefCell::new(Vec::new()),
+    //             cq: MyOnceCell::new(),
+    //             eq: MyOnceCell::new(),
+    //             _domain_rc: self._domain_rc.clone(),
+    //             phantom: PhantomData,
+    //         })
+    //     }
+    // }
 }
 
-impl<EP> EndpointBase<EndpointImplBase<EP, dyn ReadEq, dyn ReadCq>, UninitConnectionless> {
+impl<EP, MRREQ: EpMrReq>
+    EndpointBase<EndpointImplBase<EP, dyn ReadEq, dyn ReadCq>, UninitConnectionless, MRREQ>
+{
     pub fn bind_shared_cq<T: AsRawFid + ReadCq + 'static>(
         &self,
         cq: &CompletionQueue<T>,
@@ -1154,7 +1206,9 @@ impl<EP> EndpointBase<EndpointImplBase<EP, dyn ReadEq, dyn ReadCq>, UninitConnec
     // }
 }
 
-impl<EP> EndpointBase<EndpointImplBase<EP, dyn ReadEq, dyn ReadCq>, UninitUnconnected> {
+impl<EP, MRREQ: EpMrReq>
+    EndpointBase<EndpointImplBase<EP, dyn ReadEq, dyn ReadCq>, UninitUnconnected, MRREQ>
+{
     pub fn bind_shared_cq<T: AsRawFid + ReadCq + 'static>(
         &self,
         cq: &CompletionQueue<T>,
@@ -1201,26 +1255,28 @@ impl<EP> EndpointBase<EndpointImplBase<EP, dyn ReadEq, dyn ReadCq>, UninitUnconn
     // }
 }
 
-impl<E: AsFid, STATE: EpState> AsFid for EndpointBase<E, STATE> {
+impl<E: AsFid, STATE: EpState, MRREQ: EpMrReq> AsFid for EndpointBase<E, STATE, MRREQ> {
     fn as_fid(&self) -> fid::BorrowedFid<'_> {
         self.inner.as_fid()
     }
 }
 
-impl<E: AsRawFid, STATE: EpState> AsRawFid for EndpointBase<E, STATE> {
+impl<E: AsRawFid, STATE: EpState, MRREQ: EpMrReq> AsRawFid for EndpointBase<E, STATE, MRREQ> {
     fn as_raw_fid(&self) -> RawFid {
         self.inner.as_raw_fid()
     }
 }
 
-impl<E: AsTypedFid<EpRawFid>, STATE: EpState> AsTypedFid<EpRawFid> for EndpointBase<E, STATE> {
+impl<E: AsTypedFid<EpRawFid>, STATE: EpState, MRREQ: EpMrReq> AsTypedFid<EpRawFid>
+    for EndpointBase<E, STATE, MRREQ>
+{
     fn as_typed_fid(&self) -> fid::BorrowedTypedFid<EpRawFid> {
         self.inner.as_typed_fid()
     }
 }
 
-impl<E: AsRawTypedFid<Output = *mut libfabric_sys::fid_ep>, STATE: EpState> AsRawTypedFid
-    for EndpointBase<E, STATE>
+impl<E: AsRawTypedFid<Output = *mut libfabric_sys::fid_ep>, STATE: EpState, MRREQ: EpMrReq>
+    AsRawTypedFid for EndpointBase<E, STATE, MRREQ>
 {
     type Output = EpRawFid;
 

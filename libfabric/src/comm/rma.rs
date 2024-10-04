@@ -7,6 +7,7 @@ use crate::ep::Connected;
 use crate::ep::Connectionless;
 use crate::ep::EndpointBase;
 use crate::ep::EndpointImplBase;
+use crate::ep::EpMrReq;
 use crate::eq::ReadEq;
 use crate::fid::AsRawTypedFid;
 use crate::fid::EpRawFid;
@@ -509,8 +510,8 @@ impl<EP: RmaCap + ReadMod, EQ: ?Sized + ReadEq, CQ: ?Sized + ReadCq> ReadEpImpl
     for EndpointImplBase<EP, EQ, CQ>
 {
 }
-impl<E: ReadEpImpl> ReadEpImpl for EndpointBase<E, Connected> {}
-impl<E: ReadEpImpl> ReadEpImpl for EndpointBase<E, Connectionless> {}
+impl<E: ReadEpImpl, MRREQ: EpMrReq> ReadEpImpl for EndpointBase<E, Connected, MRREQ> {}
+impl<E: ReadEpImpl, MRREQ: EpMrReq> ReadEpImpl for EndpointBase<E, Connectionless, MRREQ> {}
 
 pub(crate) trait WriteEpImpl: AsRawTypedFid<Output = EpRawFid> {
     unsafe fn write_impl<T>(
@@ -1433,8 +1434,9 @@ impl<EP: RmaCap + WriteMod, EQ: ?Sized + ReadEq, CQ: ?Sized + ReadCq> WriteEpImp
     for EndpointImplBase<EP, EQ, CQ>
 {
 }
-impl<E: WriteEpImpl> WriteEpImpl for EndpointBase<E, Connected> {}
-impl<E: WriteEpImpl> WriteEpImpl for EndpointBase<E, Connectionless> {}
+
+impl<E: WriteEpImpl, MRREQ: EpMrReq> WriteEpImpl for EndpointBase<E, Connected, MRREQ> {}
+impl<E: WriteEpImpl, MRREQ: EpMrReq> WriteEpImpl for EndpointBase<E, Connectionless, MRREQ> {}
 
 impl<CQ: ?Sized + ReadCq> WriteEpImpl for TxContextBase<CQ> {}
 impl<CQ: ?Sized + ReadCq> WriteEpImpl for TxContextImplBase<CQ> {}

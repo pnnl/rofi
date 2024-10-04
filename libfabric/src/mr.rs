@@ -4,7 +4,7 @@ use crate::{
     cntr::ReadCntr,
     domain::DomainImplT,
     enums::{MrAccess, MrRegOpt},
-    ep::EpState,
+    ep::{EpMrReq, EpState},
     fid::{self, AsRawFid, AsRawTypedFid, AsTypedFid, MrRawFid, OwnedMrFid, RawFid},
     iovec::IoVec,
     utils::check_error,
@@ -795,9 +795,9 @@ impl DisabledMemoryRegion {
     /// Bind the memory region to `ep`.
     ///
     /// Corresponds to `fi_mr_bind` with a `fid_ep`
-    pub fn bind_ep<EP: AsRawFid + 'static, STATE: EpState>(
+    pub fn bind_ep<EP: AsRawFid + 'static, STATE: EpState, MRREQ: EpMrReq>(
         &self,
-        ep: &crate::ep::EndpointBase<EP, STATE>,
+        ep: &crate::ep::EndpointBase<EP, STATE, MRREQ>,
     ) -> Result<(), crate::error::Error> {
         self.mr.inner.bind_ep(&ep.inner)
     }

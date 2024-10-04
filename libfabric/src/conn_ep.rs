@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use crate::{
     cq::ReadCq,
     ep::{
-        Address, Connected, EndpointBase, EndpointImplBase, Unconnected, UninitEndpoint,
+        Address, Connected, EndpointBase, EndpointImplBase, MrNone, Unconnected, UninitEndpoint,
         UninitUnconnected,
     },
     eq::{ConnectedEvent, ReadEq},
@@ -11,12 +11,12 @@ use crate::{
     utils::check_error,
 };
 
-pub type UninitUnconnectedEndpointBase<EP> = EndpointBase<EP, UninitUnconnected>;
+pub type UninitUnconnectedEndpointBase<EP> = EndpointBase<EP, UninitUnconnected, MrNone>;
 
 pub type UninitUnconnectedEndpoint<T> =
     UninitUnconnectedEndpointBase<EndpointImplBase<T, dyn ReadEq, dyn ReadCq>>;
 
-pub type UnconnectedEndpointBase<EP> = EndpointBase<EP, Unconnected>;
+pub type UnconnectedEndpointBase<EP> = EndpointBase<EP, Unconnected, MrNone>;
 
 pub type UnconnectedEndpoint<T> =
     UnconnectedEndpointBase<EndpointImplBase<T, dyn ReadEq, dyn ReadCq>>;
@@ -33,7 +33,8 @@ impl<EP: AsRawTypedFid<Output = EpRawFid>> UninitUnconnectedEndpointBase<EP> {
         check_error(err.try_into().unwrap())?;
         Ok(UnconnectedEndpointBase::<EP> {
             inner: self.inner.clone(),
-            phantom: PhantomData,
+            phantom_ep_state: PhantomData,
+            phantom_mr_req: PhantomData,
         })
     }
 }
@@ -91,17 +92,17 @@ impl<E> UnconnectedEndpoint<E> {
         // TODO: Create a type specifically for each event type
 
         assert_eq!(event.get_fid(), self.as_raw_fid());
-
         ConnectedEndpoint {
             inner: self.inner.clone(),
-            phantom: PhantomData,
+            phantom_ep_state: PhantomData,
+            phantom_mr_req: PhantomData,
         }
     }
 }
 
 pub trait ConnectedEp {}
 
-pub type ConnectedEndpointBase<EP> = EndpointBase<EP, Connected>;
+pub type ConnectedEndpointBase<EP> = EndpointBase<EP, Connected, MrNone>;
 
 pub type ConnectedEndpoint<T> = ConnectedEndpointBase<EndpointImplBase<T, dyn ReadEq, dyn ReadCq>>;
 

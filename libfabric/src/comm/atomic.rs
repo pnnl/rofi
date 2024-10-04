@@ -8,6 +8,7 @@ use crate::ep::Connected;
 use crate::ep::Connectionless;
 use crate::ep::EndpointBase;
 use crate::ep::EndpointImplBase;
+use crate::ep::EpMrReq;
 use crate::eq::ReadEq;
 use crate::fid::AsRawTypedFid;
 use crate::fid::EpRawFid;
@@ -561,8 +562,11 @@ impl<EP: AtomicCap + WriteMod, EQ: ?Sized, CQ: ?Sized + ReadCq> AtomicWriteEpImp
     for EndpointImplBase<EP, EQ, CQ>
 {
 }
-impl<E: AtomicWriteEpImpl> AtomicWriteEpImpl for EndpointBase<E, Connected> {}
-impl<E: AtomicWriteEpImpl> AtomicWriteEpImpl for EndpointBase<E, Connectionless> {}
+impl<E: AtomicWriteEpImpl, MRREQ: EpMrReq> AtomicWriteEpImpl for EndpointBase<E, Connected, MRREQ> {}
+impl<E: AtomicWriteEpImpl, MRREQ: EpMrReq> AtomicWriteEpImpl
+    for EndpointBase<E, Connectionless, MRREQ>
+{
+}
 
 pub(crate) trait AtomicFetchEpImpl:
     AsRawTypedFid<Output = EpRawFid> + AtomicValidEp
@@ -1132,8 +1136,11 @@ impl<EP: AtomicCap + ReadMod, EQ: ?Sized + ReadEq, CQ: ?Sized + ReadCq> AtomicFe
     for EndpointImplBase<EP, EQ, CQ>
 {
 }
-impl<E: AtomicFetchEpImpl> AtomicFetchEpImpl for EndpointBase<E, Connected> {}
-impl<E: AtomicFetchEpImpl> AtomicFetchEpImpl for EndpointBase<E, Connectionless> {}
+impl<E: AtomicFetchEpImpl, MRREQ: EpMrReq> AtomicFetchEpImpl for EndpointBase<E, Connected, MRREQ> {}
+impl<E: AtomicFetchEpImpl, MRREQ: EpMrReq> AtomicFetchEpImpl
+    for EndpointBase<E, Connectionless, MRREQ>
+{
+}
 
 pub(crate) trait AtomicCASImpl: AsRawTypedFid<Output = EpRawFid> + AtomicValidEp {
     #[allow(clippy::too_many_arguments)]
@@ -1865,8 +1872,8 @@ impl<EP: AtomicCap + ReadMod + WriteMod, EQ: ?Sized + ReadEq, CQ: ?Sized + ReadC
 {
 }
 
-impl<E: AtomicCASImpl> AtomicCASImpl for EndpointBase<E, Connected> {}
-impl<E: AtomicCASImpl> AtomicCASImpl for EndpointBase<E, Connectionless> {}
+impl<E: AtomicCASImpl, MRREQ: EpMrReq> AtomicCASImpl for EndpointBase<E, Connected, MRREQ> {}
+impl<E: AtomicCASImpl, MRREQ: EpMrReq> AtomicCASImpl for EndpointBase<E, Connectionless, MRREQ> {}
 
 pub trait AtomicValidEp: AsRawTypedFid<Output = EpRawFid> {
     unsafe fn atomicvalid<T: AsFiType>(
@@ -1939,8 +1946,8 @@ pub trait AtomicValidEp: AsRawTypedFid<Output = EpRawFid> {
     }
 }
 
-impl<E: AtomicValidEp> AtomicValidEp for EndpointBase<E, Connected> {}
-impl<E: AtomicValidEp> AtomicValidEp for EndpointBase<E, Connectionless> {}
+impl<E: AtomicValidEp, MRREQ: EpMrReq> AtomicValidEp for EndpointBase<E, Connected, MRREQ> {}
+impl<E: AtomicValidEp, MRREQ: EpMrReq> AtomicValidEp for EndpointBase<E, Connectionless, MRREQ> {}
 
 impl<EP: AtomicCap, EQ: ?Sized, CQ: ?Sized + ReadCq> AtomicValidEp
     for EndpointImplBase<EP, EQ, CQ>

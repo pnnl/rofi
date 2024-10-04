@@ -2,14 +2,17 @@ use std::marker::PhantomData;
 
 use crate::{
     cq::ReadCq,
-    ep::{Connectionless, EndpointBase, EndpointImplBase, UninitConnectionless, UninitEndpoint},
+    ep::{
+        Connectionless, EndpointBase, EndpointImplBase, EpMrReq, MrNone, UninitConnectionless,
+        UninitEndpoint,
+    },
     eq::ReadEq,
     fid::{AsRawFid, AsRawTypedFid, EpRawFid},
     utils::check_error,
 };
 
-pub type UninitConnectionlessEndpointBase<EP> = EndpointBase<EP, UninitConnectionless>;
-pub type ConnectionlessEndpointBase<EP> = EndpointBase<EP, Connectionless>;
+pub type UninitConnectionlessEndpointBase<EP> = EndpointBase<EP, UninitConnectionless, MrNone>;
+pub type ConnectionlessEndpointBase<EP> = EndpointBase<EP, Connectionless, MrNone>;
 
 pub type ConnectionlessEndpoint<E> =
     ConnectionlessEndpointBase<EndpointImplBase<E, dyn ReadEq, dyn ReadCq>>;
@@ -31,7 +34,8 @@ impl<EP: AsRawTypedFid<Output = EpRawFid>> UninitConnectionlessEndpointBase<EP> 
         check_error(err.try_into().unwrap())?;
         Ok(ConnectionlessEndpointBase::<EP> {
             inner: self.inner.clone(),
-            phantom: PhantomData,
+            phantom_ep_state: PhantomData,
+            phantom_mr_req: PhantomData,
         })
     }
 }

@@ -10,6 +10,7 @@ use crate::ep::Connected;
 use crate::ep::Connectionless;
 use crate::ep::EndpointBase;
 use crate::ep::EndpointImplBase;
+use crate::ep::EpMrReq;
 use crate::ep::EpState;
 use crate::eq::ReadEq;
 use crate::error::Error;
@@ -168,9 +169,10 @@ impl MulticastGroupCollective {
     pub fn join_collective_with_context<
         E: CollectiveEp + AsRawTypedFid<Output = EpRawFid> + 'static,
         STATE: EpState,
+        MRREQ: EpMrReq,
     >(
         &self,
-        ep: &EndpointBase<E, STATE>,
+        ep: &EndpointBase<E, STATE, MRREQ>,
         options: JoinOptions,
         context: &mut Context,
     ) -> Result<(), Error> {
@@ -180,10 +182,10 @@ impl MulticastGroupCollective {
     pub fn join_collective<
         E: CollectiveEp + AsRawTypedFid<Output = EpRawFid> + 'static,
         STATE: EpState,
-        const INIT: bool,
+        MRREQ: EpMrReq,
     >(
         &self,
-        ep: &EndpointBase<E, STATE>,
+        ep: &EndpointBase<E, STATE, MRREQ>,
         options: JoinOptions,
     ) -> Result<(), Error> {
         self.inner.join_collective_impl(&ep.inner, options, None)
@@ -1323,8 +1325,11 @@ impl<EP: CollCap, EQ: ?Sized + ReadEq, CQ: ?Sized + ReadCq> CollectiveEpImpl
 {
 }
 
-impl<E: CollectiveEpImpl> CollectiveEpImpl for EndpointBase<E, Connected> {}
-impl<E: CollectiveEpImpl> CollectiveEpImpl for EndpointBase<E, Connectionless> {}
+impl<E: CollectiveEpImpl, MRREQ: EpMrReq> CollectiveEpImpl for EndpointBase<E, Connected, MRREQ> {}
+impl<E: CollectiveEpImpl, MRREQ: EpMrReq> CollectiveEpImpl
+    for EndpointBase<E, Connectionless, MRREQ>
+{
+}
 
 impl AsFid for MulticastGroupCollective {
     fn as_fid(&self) -> fid::BorrowedFid<'_> {
