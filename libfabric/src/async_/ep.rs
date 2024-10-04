@@ -12,9 +12,9 @@ use crate::{
     domain::DomainBase,
     enums::EndpointType,
     ep::{
-        Connected, Connectionless, EndpointAttr, EndpointBase, EndpointImplBase, EpCq,
-        IncompleteBindCntr, PassiveEndpointBase, PassiveEndpointImplBase, UninitConnectionless,
-        UninitUnconnected,
+        Connected, Connectionless, EndpointAttr, EndpointBase, EndpointImplBase, EpCq, EpMrReq,
+        IncompleteBindCntr, MrNone, PassiveEndpointBase, PassiveEndpointImplBase,
+        UninitConnectionless, UninitUnconnected,
     },
     eq::{Event, EventQueueBase, ReadEq},
     fid::{AsRawFid, AsRawTypedFid, Fid, RawFid},
@@ -51,14 +51,24 @@ pub enum Endpoint<EP> {
 
 // pub type Endpoint<T> = EndpointBase<EndpointImplBase<T, dyn AsyncReadEq, dyn AsyncReadCq>>;
 
-impl EndpointBase<EndpointImplBase<(), dyn AsyncReadEq, dyn AsyncReadCq>, UninitConnectionless> {
+impl
+    EndpointBase<
+        EndpointImplBase<(), dyn AsyncReadEq, dyn AsyncReadCq>,
+        UninitConnectionless,
+        MrNone,
+    >
+{
     pub(crate) fn new<E, DEQ: ?Sized + 'static>(
         domain: &crate::domain::DomainBase<DEQ>,
         info: &InfoEntry<E>,
         flags: u64,
         context: Option<&mut Context>,
     ) -> Result<
-        EndpointBase<EndpointImplBase<E, dyn AsyncReadEq, dyn AsyncReadCq>, UninitConnectionless>,
+        EndpointBase<
+            EndpointImplBase<E, dyn AsyncReadEq, dyn AsyncReadCq>,
+            UninitConnectionless,
+            MrNone,
+        >,
         crate::error::Error,
     > {
         let c_void = match context {
@@ -69,20 +79,36 @@ impl EndpointBase<EndpointImplBase<(), dyn AsyncReadEq, dyn AsyncReadCq>, Uninit
         Ok(EndpointBase::<
             EndpointImplBase<E, dyn AsyncReadEq, dyn AsyncReadCq>,
             UninitConnectionless,
+            MrNone,
         > {
-            inner: MyRc::new(EndpointImplBase::new(&domain.inner, info, flags, c_void)?),
-            phantom: PhantomData,
+            inner: MyRc::new(EndpointImplBase::new(
+                &domain.inner,
+                info,
+                flags,
+                c_void,
+                false,
+                info.domain_attr().mr_mode().is_local(),
+                info.domain_attr().mr_mode().is_collective(),
+            )?),
+            phantom_ep_state: PhantomData,
+            phantom_mr_req: PhantomData,
         })
     }
 }
-impl EndpointBase<EndpointImplBase<(), dyn AsyncReadEq, dyn AsyncReadCq>, UninitUnconnected> {
+impl
+    EndpointBase<EndpointImplBase<(), dyn AsyncReadEq, dyn AsyncReadCq>, UninitUnconnected, MrNone>
+{
     pub(crate) fn new<E, DEQ: ?Sized + 'static>(
         domain: &crate::domain::DomainBase<DEQ>,
         info: &InfoEntry<E>,
         flags: u64,
         context: Option<&mut Context>,
     ) -> Result<
-        EndpointBase<EndpointImplBase<E, dyn AsyncReadEq, dyn AsyncReadCq>, UninitUnconnected>,
+        EndpointBase<
+            EndpointImplBase<E, dyn AsyncReadEq, dyn AsyncReadCq>,
+            UninitUnconnected,
+            MrNone,
+        >,
         crate::error::Error,
     > {
         let c_void = match context {
@@ -90,15 +116,23 @@ impl EndpointBase<EndpointImplBase<(), dyn AsyncReadEq, dyn AsyncReadCq>, Uninit
             None => std::ptr::null_mut(),
         };
 
-        Ok(
-            EndpointBase::<
-                EndpointImplBase<E, dyn AsyncReadEq, dyn AsyncReadCq>,
-                UninitUnconnected,
-            > {
-                inner: MyRc::new(EndpointImplBase::new(&domain.inner, info, flags, c_void)?),
-                phantom: PhantomData,
-            },
-        )
+        Ok(EndpointBase::<
+            EndpointImplBase<E, dyn AsyncReadEq, dyn AsyncReadCq>,
+            UninitUnconnected,
+            MrNone,
+        > {
+            inner: MyRc::new(EndpointImplBase::new(
+                &domain.inner,
+                info,
+                flags,
+                c_void,
+                true,
+                info.domain_attr().mr_mode().is_local(),
+                info.domain_attr().mr_mode().is_collective(),
+            )?),
+            phantom_ep_state: PhantomData,
+            phantom_mr_req: PhantomData,
+        })
     }
 }
 
@@ -263,7 +297,9 @@ impl<EP, CQ: ?Sized + ReadCq> EndpointImplBase<EP, dyn AsyncReadEq, CQ> {
     //     )
 }
 
-impl<EP> EndpointBase<EndpointImplBase<EP, dyn AsyncReadEq, dyn AsyncReadCq>, UninitUnconnected> {
+impl<EP>
+    EndpointBase<EndpointImplBase<EP, dyn AsyncReadEq, dyn AsyncReadCq>, UninitUnconnected, MrNone>
+{
     pub fn bind_cntr(&self) -> IncompleteBindCntr<EP, dyn AsyncReadEq, dyn AsyncReadCq> {
         self.inner.bind_cntr()
     }
@@ -307,7 +343,11 @@ impl<EP> EndpointBase<EndpointImplBase<EP, dyn AsyncReadEq, dyn AsyncReadCq>, Un
 }
 
 impl<EP>
-    EndpointBase<EndpointImplBase<EP, dyn AsyncReadEq, dyn AsyncReadCq>, UninitConnectionless>
+    EndpointBase<
+        EndpointImplBase<EP, dyn AsyncReadEq, dyn AsyncReadCq>,
+        UninitConnectionless,
+        MrNone,
+    >
 {
     pub fn bind_cntr(&self) -> IncompleteBindCntr<EP, dyn AsyncReadEq, dyn AsyncReadCq> {
         self.inner.bind_cntr()
@@ -584,37 +624,37 @@ impl<EP, EQ: ?Sized + AsyncReadEq, CQ: ?Sized + AsyncReadCq> AsyncRxEp
     }
 }
 
-impl<EP: AsyncCmEp> AsyncCmEp for EndpointBase<EP, Connected> {
+impl<EP: AsyncCmEp, MRREQ: EpMrReq> AsyncCmEp for EndpointBase<EP, Connected, MRREQ> {
     fn retrieve_eq(&self) -> &MyRc<impl AsyncReadEq + ?Sized> {
         self.inner.retrieve_eq()
     }
 }
 
-impl<EP: AsyncTxEp> AsyncTxEp for EndpointBase<EP, Connected> {
+impl<EP: AsyncTxEp, MRREQ: EpMrReq> AsyncTxEp for EndpointBase<EP, Connected, MRREQ> {
     fn retrieve_tx_cq(&self) -> &MyRc<impl AsyncReadCq + ?Sized> {
         self.inner.retrieve_tx_cq()
     }
 }
 
-impl<EP: AsyncRxEp> AsyncRxEp for EndpointBase<EP, Connected> {
+impl<EP: AsyncRxEp, MRREQ: EpMrReq> AsyncRxEp for EndpointBase<EP, Connected, MRREQ> {
     fn retrieve_rx_cq(&self) -> &MyRc<impl AsyncReadCq + ?Sized> {
         self.inner.retrieve_rx_cq()
     }
 }
 
-impl<EP: AsyncCmEp> AsyncCmEp for EndpointBase<EP, Connectionless> {
+impl<EP: AsyncCmEp, MRREQ: EpMrReq> AsyncCmEp for EndpointBase<EP, Connectionless, MRREQ> {
     fn retrieve_eq(&self) -> &MyRc<impl AsyncReadEq + ?Sized> {
         self.inner.retrieve_eq()
     }
 }
 
-impl<EP: AsyncTxEp> AsyncTxEp for EndpointBase<EP, Connectionless> {
+impl<EP: AsyncTxEp, MRREQ: EpMrReq> AsyncTxEp for EndpointBase<EP, Connectionless, MRREQ> {
     fn retrieve_tx_cq(&self) -> &MyRc<impl AsyncReadCq + ?Sized> {
         self.inner.retrieve_tx_cq()
     }
 }
 
-impl<EP: AsyncRxEp> AsyncRxEp for EndpointBase<EP, Connectionless> {
+impl<EP: AsyncRxEp, MRREQ: EpMrReq> AsyncRxEp for EndpointBase<EP, Connectionless, MRREQ> {
     fn retrieve_rx_cq(&self) -> &MyRc<impl AsyncReadCq + ?Sized> {
         self.inner.retrieve_rx_cq()
     }

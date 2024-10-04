@@ -231,7 +231,12 @@ impl<I: MsgDefaultCap + Caps + 'static> Ofi<I> {
                     CqType::Shared(ref scq) => ep.bind_shared_cq(&scq, false).unwrap(),
                 }
 
-                let ep = ep.enable().unwrap();
+                let ep = match ep.enable().unwrap() {
+                    libfabric::conn_ep::UnconnectedEndpointB::PlainData(ep) => ep,
+                    libfabric::conn_ep::UnconnectedEndpointB::MrLocalData(_) => {
+                        todo!("Handle connected Mr")
+                    }
+                };
 
                 if !server {
                     ep.connect(info_entry.dest_addr().unwrap()).unwrap();
@@ -309,8 +314,12 @@ impl<I: MsgDefaultCap + Caps + 'static> Ofi<I> {
                 .build(&domain)
                 .unwrap();
                 ep.bind_av(&av).unwrap();
-                let ep = ep.enable().unwrap();
-
+                let ep = match ep.enable().unwrap() {
+                    libfabric::connless_ep::ConnectionlessEndpointB::PlainData(ep) => ep,
+                    libfabric::connless_ep::ConnectionlessEndpointB::MrLocalData(_) => {
+                        todo!("Handle it")
+                    }
+                };
                 (mr, key) = if info_entry.domain_attr().mr_mode().is_local()
                     || info_entry.caps().is_rma()
                 {

@@ -650,6 +650,34 @@ impl AsRawTypedFid for MemoryRegionImpl {
     }
 }
 
+pub struct MemoryRegionSlice<'a, DATA: Copy> {
+    pub slice: &'a mut [DATA],
+}
+
+impl<'a, DATA: Copy> MemoryRegionSlice<'a, DATA> {
+    pub fn split_at(
+        &'a mut self,
+        mid: usize,
+    ) -> (MemoryRegionSlice<'a, DATA>, MemoryRegionSlice<'a, DATA>) {
+        let (s0, s1) = self.slice.split_at_mut(mid);
+        (
+            MemoryRegionSlice::<'a, DATA> { slice: s0 },
+            MemoryRegionSlice::<'a, DATA> { slice: s1 },
+        )
+    }
+}
+
+impl<'a, DATA: Copy> MemoryRegionSlice<'a, DATA> {
+    pub fn slice<Idx>(&'a mut self, index: Idx) -> MemoryRegionSlice<'a, DATA>
+    where
+        Idx: std::slice::SliceIndex<[DATA], Output = [DATA]>,
+    {
+        MemoryRegionSlice::<'a, DATA> {
+            slice: &mut self.slice[index],
+        }
+    }
+}
+
 //================== Memory Region attribute ==================//
 
 pub struct MemoryRegionAttr {
@@ -1030,7 +1058,7 @@ mod tests {
         info::{Info, Version},
     };
 
-    use super::MemoryRegionBuilder;
+    use super::{MemoryRegionBuilder, MemoryRegionSlice};
 
     pub fn ft_alloc_bit_combo(fixed: u64, opt: u64) -> Vec<u64> {
         let bits_set = |mut val: u64| -> u64 {
@@ -1166,34 +1194,6 @@ mod tests {
             // fab.close().unwrap();
         } else {
             panic!("No capable fabric found!");
-        }
-    }
-
-    pub struct MemoryRegionSlice<'a, DATA: Copy> {
-        pub slice: &'a mut [DATA],
-    }
-
-    impl<'a, DATA: Copy> MemoryRegionSlice<'a, DATA> {
-        pub fn split_at(
-            &'a mut self,
-            mid: usize,
-        ) -> (MemoryRegionSlice<'a, DATA>, MemoryRegionSlice<'a, DATA>) {
-            let (s0, s1) = self.slice.split_at_mut(mid);
-            (
-                MemoryRegionSlice::<'a, DATA> { slice: s0 },
-                MemoryRegionSlice::<'a, DATA> { slice: s1 },
-            )
-        }
-    }
-
-    impl<'a, DATA: Copy> MemoryRegionSlice<'a, DATA> {
-        pub fn slice<Idx>(&'a mut self, index: Idx) -> MemoryRegionSlice<'a, DATA>
-        where
-            Idx: std::slice::SliceIndex<[DATA], Output = [DATA]>,
-        {
-            MemoryRegionSlice::<'a, DATA> {
-                slice: &mut self.slice[index],
-            }
         }
     }
 

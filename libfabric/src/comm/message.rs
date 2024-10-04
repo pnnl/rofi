@@ -7,7 +7,7 @@ use crate::{
     eq::ReadEq,
     fid::{AsRawTypedFid, EpRawFid},
     infocapsoptions::{MsgCap, RecvMod, SendMod},
-    mr::DataDescriptor,
+    mr::{DataDescriptor, MemoryRegionSlice},
     trigger::TriggeredContext,
     utils::{check_error, Either},
     xcontext::{RxContextBase, RxContextImplBase, TxContextBase, TxContextImplBase},
@@ -141,6 +141,48 @@ pub trait ConnectedRecvEp {
         msg: &crate::msg::MsgConnectedMut,
         options: RecvMsgOptions,
     ) -> Result<(), crate::error::Error>;
+}
+
+pub trait ConnectedRecvMrEp {
+    fn recv<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+    ) -> Result<(), crate::error::Error>;
+    fn recv_with_context<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn recv_triggered<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    // fn recvv(
+    //     &self,
+    //     iov: &[crate::iovec::IoVecMut],
+    //     desc: &mut [impl DataDescriptor],
+    // ) -> Result<(), crate::error::Error>;
+    // fn recvv_with_context<T0>(
+    //     &self,
+    //     iov: &[crate::iovec::IoVecMut],
+    //     desc: &mut [impl DataDescriptor],
+    //     context: &mut Context,
+    // ) -> Result<(), crate::error::Error>;
+    // fn recvv_triggered<T0>(
+    //     &self,
+    //     iov: &[crate::iovec::IoVecMut],
+    //     desc: &mut [impl DataDescriptor],
+    //     context: &mut TriggeredContext,
+    // ) -> Result<(), crate::error::Error>;
+    // fn recvmsg(
+    //     &self,
+    //     msg: &crate::msg::MsgConnectedMut,
+    //     options: RecvMsgOptions,
+    // ) -> Result<(), crate::error::Error>;
 }
 
 impl<EP: RecvEpImpl + ConnectedEp> ConnectedRecvEp for EP {
@@ -639,6 +681,88 @@ pub trait SendEp {
     ) -> Result<(), crate::error::Error>;
 }
 
+pub trait SendMrEp {
+    // fn sendv_to(
+    //     &self,
+    //     iov: &[crate::iovec::IoVec],
+    //     desc: &mut [impl DataDescriptor],
+    //     mapped_addr: &crate::MappedAddress,
+    // ) -> Result<(), crate::error::Error>;
+    // fn sendv_to_with_context(
+    //     &self,
+    //     iov: &[crate::iovec::IoVec],
+    //     desc: &mut [impl DataDescriptor],
+    //     mapped_addr: &crate::MappedAddress,
+    //     context: &mut Context,
+    // ) -> Result<(), crate::error::Error>;
+    // fn sendv_to_triggered(
+    //     &self,
+    //     iov: &[crate::iovec::IoVec],
+    //     desc: &mut [impl DataDescriptor],
+    //     mapped_addr: &crate::MappedAddress,
+    //     context: &mut TriggeredContext,
+    // ) -> Result<(), crate::error::Error>;
+    fn send_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &crate::MappedAddress,
+    ) -> Result<(), crate::error::Error>;
+    fn send_to_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &crate::MappedAddress,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn send_to_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &crate::MappedAddress,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn sendmsg_to(
+        &self,
+        msg: &crate::msg::Msg,
+        options: SendMsgOptions,
+    ) -> Result<(), crate::error::Error>;
+    fn senddata_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        mapped_addr: &crate::MappedAddress,
+    ) -> Result<(), crate::error::Error>;
+    fn senddata_to_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        mapped_addr: &crate::MappedAddress,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn senddata_to_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        mapped_addr: &crate::MappedAddress,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn inject_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        mapped_addr: &crate::MappedAddress,
+    ) -> Result<(), crate::error::Error>;
+    fn injectdata_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        data: u64,
+        mapped_addr: &crate::MappedAddress,
+    ) -> Result<(), crate::error::Error>;
+}
+
 pub trait ConnectedSendEp {
     fn sendv(
         &self,
@@ -698,6 +822,74 @@ pub trait ConnectedSendEp {
     ) -> Result<(), crate::error::Error>;
     fn inject<T>(&self, buf: &[T]) -> Result<(), crate::error::Error>;
     fn injectdata<T>(&self, buf: &[T], data: u64) -> Result<(), crate::error::Error>;
+}
+
+pub trait ConnectedSendMrEp {
+    // fn sendv(
+    //     &self,
+    //     iov: &[crate::iovec::IoVec],
+    //     desc: &mut [impl DataDescriptor],
+    // ) -> Result<(), crate::error::Error>;
+    // fn sendv_with_context(
+    //     &self,
+    //     iov: &[crate::iovec::IoVec],
+    //     desc: &mut [impl DataDescriptor],
+    //     context: &mut Context,
+    // ) -> Result<(), crate::error::Error>;
+    // fn sendv_triggered(
+    //     &self,
+    //     iov: &[crate::iovec::IoVec],
+    //     desc: &mut [impl DataDescriptor],
+    //     context: &mut TriggeredContext,
+    // ) -> Result<(), crate::error::Error>;
+    fn send<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+    ) -> Result<(), crate::error::Error>;
+    fn send_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn send_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn sendmsg(
+        &self,
+        msg: &crate::msg::MsgConnected,
+        options: SendMsgOptions,
+    ) -> Result<(), crate::error::Error>;
+    fn senddata<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn senddata_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn senddata_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn inject<T: Copy>(&self, buf: &MemoryRegionSlice<T>) -> Result<(), crate::error::Error>;
+    fn injectdata<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        data: u64,
+    ) -> Result<(), crate::error::Error>;
 }
 
 impl<EP: SendEpImpl + ConnlessEp> SendEp for EP {

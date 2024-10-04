@@ -3,8 +3,8 @@ use std::marker::PhantomData;
 use crate::{
     cq::ReadCq,
     ep::{
-        Address, Connected, EndpointBase, EndpointImplBase, MrNone, Unconnected, UninitEndpoint,
-        UninitUnconnected,
+        Address, Connected, EndpointBase, EndpointImplBase, MrLocal, MrNone, Unconnected,
+        UninitEndpoint, UninitUnconnected,
     },
     eq::{ConnectedEvent, ReadEq},
     fid::{AsRawFid, AsRawTypedFid, EpRawFid},
@@ -21,20 +21,51 @@ pub type UnconnectedEndpointBase<EP> = EndpointBase<EP, Unconnected, MrNone>;
 pub type UnconnectedEndpoint<T> =
     UnconnectedEndpointBase<EndpointImplBase<T, dyn ReadEq, dyn ReadCq>>;
 
+pub type UnconnectedMrLocalEndpointBase<EP> = EndpointBase<EP, Unconnected, MrLocal>;
+
+pub type UnconnectedMrLocalEndpoint<T> =
+    UnconnectedMrLocalEndpointBase<EndpointImplBase<T, dyn ReadEq, dyn ReadCq>>;
+
+pub enum UnconnectedEndpointB<E> {
+    PlainData(UnconnectedEndpoint<E>),
+    MrLocalData(UnconnectedMrLocalEndpoint<E>),
+}
+
 impl<EP: AsRawTypedFid<Output = EpRawFid> + AsRawFid> UninitEndpoint
     for UninitUnconnectedEndpointBase<EP>
 {
 }
 
-impl<EP: AsRawTypedFid<Output = EpRawFid>> UninitUnconnectedEndpointBase<EP> {
-    pub fn enable(self) -> Result<UnconnectedEndpointBase<EP>, crate::error::Error> {
+// impl<EP: AsRawTypedFid<Output = EpRawFid>> UninitUnconnectedEndpointBase<EP> {
+//     pub fn enable(self) -> Result<UnconnectedEndpointBase<EP>, crate::error::Error> {
+//         // TODO: Move this into an UninitEp struct
+//         let err = unsafe { libfabric_sys::inlined_fi_enable(self.as_raw_typed_fid()) };
+//         check_error(err.try_into().unwrap())?;
+//         Ok(UnconnectedEndpointBase::<EP> {
+//             inner: self.inner.clone(),
+//             phantom_ep_state: PhantomData,
+//             phantom_mr_req: PhantomData,
+//         })
+//     }
+// }
+
+impl<EP> UninitUnconnectedEndpoint<EP> {
+    pub fn enable(self) -> Result<UnconnectedEndpointB<EP>, crate::error::Error> {
         // TODO: Move this into an UninitEp struct
         let err = unsafe { libfabric_sys::inlined_fi_enable(self.as_raw_typed_fid()) };
         check_error(err.try_into().unwrap())?;
-        Ok(UnconnectedEndpointBase::<EP> {
-            inner: self.inner.clone(),
-            phantom_ep_state: PhantomData,
-            phantom_mr_req: PhantomData,
+        Ok(if self.inner.mr_local {
+            UnconnectedEndpointB::MrLocalData(UnconnectedMrLocalEndpoint::<EP> {
+                inner: self.inner.clone(),
+                phantom_ep_state: PhantomData,
+                phantom_mr_req: PhantomData,
+            })
+        } else {
+            UnconnectedEndpointB::PlainData(UnconnectedEndpoint::<EP> {
+                inner: self.inner.clone(),
+                phantom_ep_state: PhantomData,
+                phantom_mr_req: PhantomData,
+            })
         })
     }
 }
@@ -87,6 +118,67 @@ impl<EP: AsRawTypedFid<Output = EpRawFid>> UnconnectedEndpointBase<EP> {
     }
 }
 
+impl<EP: AsRawTypedFid<Output = EpRawFid>> UnconnectedMrLocalEndpointBase<EP> {
+    pub fn connect_with<T>(&self, addr: &Address, param: &[T]) -> Result<(), crate::error::Error> {
+        let err = unsafe {
+            libfabric_sys::inlined_fi_connect(
+                self.as_raw_typed_fid(),
+                addr.as_bytes().as_ptr().cast(),
+                param.as_ptr().cast(),
+                param.len(),
+            )
+        };
+
+        check_error(err.try_into().unwrap())
+    }
+
+    pub fn connect(&self, addr: &Address) -> Result<(), crate::error::Error> {
+        let err = unsafe {
+            libfabric_sys::inlined_fi_connect(
+                self.as_raw_typed_fid(),
+                addr.as_bytes().as_ptr().cast(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+
+        check_error(err.try_into().unwrap())
+    }
+
+    pub fn accept_with<T0>(&self, param: &[T0]) -> Result<(), crate::error::Error> {
+        let err = unsafe {
+            libfabric_sys::inlined_fi_accept(
+                self.as_raw_typed_fid(),
+                param.as_ptr().cast(),
+                param.len(),
+            )
+        };
+
+        check_error(err.try_into().unwrap())
+    }
+
+    pub fn accept(&self) -> Result<(), crate::error::Error> {
+        let err = unsafe {
+            libfabric_sys::inlined_fi_accept(self.as_raw_typed_fid(), std::ptr::null_mut(), 0)
+        };
+
+        check_error(err.try_into().unwrap())
+    }
+}
+
+impl<E> UnconnectedMrLocalEndpoint<E> {
+    pub fn connect_complete(self, event: ConnectedEvent) -> ConnectedEndpoint<E> {
+        // TODO: Create a type specifically for each event type
+
+        assert_eq!(event.get_fid(), self.as_raw_fid());
+        ConnectedMrLocalEndpoint {
+            inner: self.inner.clone(),
+            phantom_ep_state: PhantomData,
+            phantom_mr_req: PhantomData,
+        }
+    }
+}
+
 impl<E> UnconnectedEndpoint<E> {
     pub fn connect_complete(self, event: ConnectedEvent) -> ConnectedEndpoint<E> {
         // TODO: Create a type specifically for each event type
@@ -105,6 +197,11 @@ pub trait ConnectedEp {}
 pub type ConnectedEndpointBase<EP> = EndpointBase<EP, Connected, MrNone>;
 
 pub type ConnectedEndpoint<T> = ConnectedEndpointBase<EndpointImplBase<T, dyn ReadEq, dyn ReadCq>>;
+
+pub type ConnectedMrLocalEndpointBase<EP> = EndpointBase<EP, Connected, MrLocal>;
+
+pub type ConnectedMrLocalEndpoint<T> =
+    ConnectedEndpointBase<EndpointImplBase<T, dyn ReadEq, dyn ReadCq>>;
 
 impl<EP> ConnectedEp for ConnectedEndpointBase<EP> {}
 

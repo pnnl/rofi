@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     cntr::{Counter, ReadCntr},
-    ep::EpState,
+    ep::{EpMrReq, EpState},
     fid::{AsFid, AsRawFid, AsRawTypedFid, EpRawFid},
     xcontext::{
         Receive, ReceiveContextBuilder, Transmit, TxContextBuilder, XContextBase, XContextBaseImpl,
@@ -190,13 +190,15 @@ impl AsyncRxEp for ReceiveContextImpl {
     }
 }
 
-impl<'a, E, STATE: EpState> ReceiveContextBuilder<'a, E, STATE> {
+impl<'a, E, STATE: EpState, MRREQ: EpMrReq> ReceiveContextBuilder<'a, E, STATE, MRREQ> {
     pub fn build_async(self) -> Result<ReceiveContext, crate::error::Error> {
         ReceiveContext::new(self.ep, self.index, self.rx_attr, self.ctx)
     }
 }
 
-impl<'a, E: AsRawTypedFid<Output = EpRawFid>, STATE: EpState> TxContextBuilder<'a, E, STATE> {
+impl<'a, E: AsRawTypedFid<Output = EpRawFid>, STATE: EpState, MRREQ: EpMrReq>
+    TxContextBuilder<'a, E, STATE, MRREQ>
+{
     pub fn build_async(self) -> Result<TransmitContext, crate::error::Error> {
         TransmitContext::new(self.ep, self.index, self.tx_attr, self.ctx)
     }

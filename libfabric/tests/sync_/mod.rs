@@ -686,7 +686,12 @@ pub fn ft_server_connect<
                 &rma_cntr,
             );
             let ep = match ep {
-                Endpoint::ConnectionOriented(ep) => ep.enable().unwrap(),
+                Endpoint::ConnectionOriented(ep) => match ep.enable().unwrap() {
+                    libfabric::conn_ep::UnconnectedEndpointB::PlainData(ep) => ep,
+                    libfabric::conn_ep::UnconnectedEndpointB::MrLocalData(_) => {
+                        todo!("Handle Connected Mr")
+                    }
+                },
                 _ => panic!("Unexpected Endpoint Type"),
             };
 
@@ -719,7 +724,12 @@ pub fn ft_server_connect<
                 &rma_cntr,
             );
             let ep = match ep {
-                Endpoint::ConnectionOriented(ep) => ep.enable().unwrap(),
+                Endpoint::ConnectionOriented(ep) => match ep.enable().unwrap() {
+                    libfabric::conn_ep::UnconnectedEndpointB::PlainData(ep) => ep,
+                    libfabric::conn_ep::UnconnectedEndpointB::MrLocalData(_) => {
+                        todo!("Handle connected Mr")
+                    }
+                },
                 _ => panic!("Unexpected Endpoint Type"),
             };
 
@@ -1012,7 +1022,12 @@ pub fn ft_init_fabric<M: MsgDefaultCap + 'static, T: TagDefaultCap + 'static>(
                 &entry, gl_ctx, &mut ep, &domain, &cq_type, &eq, &av, &tx_cntr, &rx_cntr, &rma_ctr,
             );
             let mut ep = EndpointCaps::ConnlessMsg(match ep {
-                Endpoint::Connectionless(ep) => ep.enable().unwrap(),
+                Endpoint::Connectionless(ep) => match ep.enable().unwrap() {
+                    libfabric::connless_ep::ConnectionlessEndpointB::PlainData(ep) => ep,
+                    libfabric::connless_ep::ConnectionlessEndpointB::MrLocalData(_) => {
+                        todo!("Handle MrSlice cases")
+                    }
+                },
                 Endpoint::ConnectionOriented(_) => panic!("Unexpected Ep type"),
             });
             ft_ep_recv(
@@ -1065,7 +1080,12 @@ pub fn ft_init_fabric<M: MsgDefaultCap + 'static, T: TagDefaultCap + 'static>(
                 &entry, gl_ctx, &mut ep, &domain, &cq_type, &eq, &av, &tx_cntr, &rx_cntr, &rma_ctr,
             );
             let mut ep = EndpointCaps::ConnlessTagged(match ep {
-                Endpoint::Connectionless(ep) => ep.enable().unwrap(),
+                Endpoint::Connectionless(ep) => match ep.enable().unwrap() {
+                    libfabric::connless_ep::ConnectionlessEndpointB::PlainData(ep) => ep,
+                    libfabric::connless_ep::ConnectionlessEndpointB::MrLocalData(_) => {
+                        todo!("Handle MrSlice cases")
+                    }
+                },
                 Endpoint::ConnectionOriented(_) => panic!("Unexpected Ep type"),
             });
             ft_ep_recv(
@@ -3030,7 +3050,12 @@ pub fn ft_client_connect<M: MsgDefaultCap + 'static, T: TagDefaultCap + 'static>
                 &rma_cntr,
             );
             let ep = match ep {
-                Endpoint::ConnectionOriented(ep) => ep.enable().unwrap(),
+                Endpoint::ConnectionOriented(ep) => match ep.enable().unwrap() {
+                    libfabric::conn_ep::UnconnectedEndpointB::PlainData(ep) => ep,
+                    libfabric::conn_ep::UnconnectedEndpointB::MrLocalData(_) => {
+                        todo!("Handle connected Mr")
+                    }
+                },
                 _ => panic!("Unexpected Endpoint Type"),
             };
 
@@ -3076,7 +3101,12 @@ pub fn ft_client_connect<M: MsgDefaultCap + 'static, T: TagDefaultCap + 'static>
             );
 
             let ep = match ep {
-                Endpoint::ConnectionOriented(ep) => ep.enable().unwrap(),
+                Endpoint::ConnectionOriented(ep) => match ep.enable().unwrap() {
+                    libfabric::conn_ep::UnconnectedEndpointB::PlainData(ep) => ep,
+                    libfabric::conn_ep::UnconnectedEndpointB::MrLocalData(_) => {
+                        todo!("Handle connected mr")
+                    }
+                },
                 _ => panic!("Unexpected Endpoint Type"),
             };
 

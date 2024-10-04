@@ -591,7 +591,12 @@ pub async fn ft_server_connect<
             );
             let ep = match ep {
                 Endpoint::Connectionless(_) => panic!("Expected Connected Endpoint"),
-                Endpoint::ConnectionOriented(ep) => ep.enable().unwrap(),
+                Endpoint::ConnectionOriented(ep) => match ep.enable().unwrap() {
+                    libfabric::async_::conn_ep::UnconnectedEndpointB::PlainData(ep) => ep,
+                    libfabric::async_::conn_ep::UnconnectedEndpointB::MrLocalData(_) => {
+                        todo!("Handle connected MR")
+                    }
+                },
             };
             let ep = ft_accept_connection(ep, eq).await;
             let mut ep = EndpointCaps::ConnectedMsg(ep);
@@ -623,7 +628,12 @@ pub async fn ft_server_connect<
             );
             let ep = match ep {
                 Endpoint::Connectionless(_) => panic!("Expected Connected Endpoint"),
-                Endpoint::ConnectionOriented(ep) => ep.enable().unwrap(),
+                Endpoint::ConnectionOriented(ep) => match ep.enable().unwrap() {
+                    libfabric::async_::conn_ep::UnconnectedEndpointB::PlainData(ep) => ep,
+                    libfabric::async_::conn_ep::UnconnectedEndpointB::MrLocalData(_) => {
+                        todo!("Handle connected Mr")
+                    }
+                },
             };
             let ep = ft_accept_connection(ep, eq).await;
             let mut ep = EndpointCaps::ConnectedTagged(ep);
@@ -884,7 +894,12 @@ pub async fn ft_init_fabric<M: MsgDefaultCap + 'static, T: TagDefaultCap + 'stat
                 &entry, gl_ctx, &ep, &domain, &cq_type, &eq, &av, &tx_cntr, &rx_cntr, &rma_ctr,
             );
             let mut ep = EndpointCaps::ConnlessMsg(match ep {
-                Endpoint::Connectionless(ep) => ep.enable().unwrap(),
+                Endpoint::Connectionless(ep) => match ep.enable().unwrap() {
+                    libfabric::async_::connless_ep::ConnectionlessEndpointB::PlainData(ep) => ep,
+                    libfabric::async_::connless_ep::ConnectionlessEndpointB::MrLocalData(_) => {
+                        todo!("Handle it")
+                    }
+                },
                 Endpoint::ConnectionOriented(_) => panic!("Unexpected Ep type"),
             });
             ft_ep_recv(
@@ -939,7 +954,12 @@ pub async fn ft_init_fabric<M: MsgDefaultCap + 'static, T: TagDefaultCap + 'stat
                 &entry, gl_ctx, &ep, &domain, &cq_type, &eq, &av, &tx_cntr, &rx_cntr, &rma_ctr,
             );
             let mut ep = EndpointCaps::ConnlessTagged(match ep {
-                Endpoint::Connectionless(ep) => ep.enable().unwrap(),
+                Endpoint::Connectionless(ep) => match ep.enable().unwrap() {
+                    libfabric::async_::connless_ep::ConnectionlessEndpointB::PlainData(ep) => ep,
+                    libfabric::async_::connless_ep::ConnectionlessEndpointB::MrLocalData(_) => {
+                        todo!("Handle it")
+                    }
+                },
                 Endpoint::ConnectionOriented(_) => panic!("Unexpected Ep type"),
             });
             ft_ep_recv(
@@ -2518,7 +2538,12 @@ pub async fn ft_client_connect<M: MsgDefaultCap + 'static, T: TagDefaultCap + 's
             );
 
             let ep = match ep {
-                Endpoint::ConnectionOriented(ep) => ep.enable().unwrap(),
+                Endpoint::ConnectionOriented(ep) => match ep.enable().unwrap() {
+                    libfabric::async_::conn_ep::UnconnectedEndpointB::PlainData(ep) => ep,
+                    libfabric::async_::conn_ep::UnconnectedEndpointB::MrLocalData(_) => {
+                        todo!("Handle connected Mr")
+                    }
+                },
                 _ => panic!("Unexpected Endpoint Type"),
             };
 
@@ -2563,7 +2588,12 @@ pub async fn ft_client_connect<M: MsgDefaultCap + 'static, T: TagDefaultCap + 's
                 &entry, gl_ctx, &ep, &domain, &cq_type, &eq, &None, &tx_cntr, &rx_cntr, &rma_cntr,
             );
             let ep = match ep {
-                Endpoint::ConnectionOriented(ep) => ep.enable().unwrap(),
+                Endpoint::ConnectionOriented(ep) => match ep.enable().unwrap() {
+                    libfabric::async_::conn_ep::UnconnectedEndpointB::PlainData(ep) => ep,
+                    libfabric::async_::conn_ep::UnconnectedEndpointB::MrLocalData(_) => {
+                        todo!("Handle connected Mr")
+                    }
+                },
                 _ => panic!("Unexpected Endpoint Type"),
             };
             let ep = ft_connect_ep(ep, &eq, &entry.dest_addr().as_ref().unwrap()).await;

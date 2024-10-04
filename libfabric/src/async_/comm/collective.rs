@@ -10,7 +10,7 @@ use crate::{
     },
     cq::SingleCompletion,
     enums::{CollectiveOptions, JoinOptions},
-    ep::{Connected, Connectionless, EndpointBase, EndpointImplBase, EpState},
+    ep::{Connected, Connectionless, EndpointBase, EndpointImplBase, EpMrReq, EpState},
     eq::Event,
     error::Error,
     fid::{AsRawFid, AsRawTypedFid, EpRawFid, Fid},
@@ -61,9 +61,10 @@ impl MulticastGroupCollective {
     pub async fn join_collective_async<
         E: CollectiveEp + AsRawTypedFid<Output = EpRawFid> + 'static + AsyncCollectiveEp,
         STATE: EpState,
+        MRREQ: EpMrReq,
     >(
         &self,
-        ep: &EndpointBase<E, STATE>,
+        ep: &EndpointBase<E, STATE, MRREQ>,
         options: JoinOptions,
     ) -> Result<Event, Error> {
         self.inner
@@ -75,9 +76,10 @@ impl MulticastGroupCollective {
         T,
         E: CollectiveEp + AsRawTypedFid<Output = EpRawFid> + 'static + AsyncCollectiveEp,
         STATE: EpState,
+        MRREQ: EpMrReq,
     >(
         &self,
-        ep: &EndpointBase<E, STATE>,
+        ep: &EndpointBase<E, STATE, MRREQ>,
         options: JoinOptions,
         context: &mut T,
     ) -> Result<Event, Error> {
@@ -555,9 +557,15 @@ impl<EP: CollCap, EQ: ?Sized + AsyncReadEq, CQ: ?Sized + AsyncReadCq> AsyncColle
     for EndpointImplBase<EP, EQ, CQ>
 {
 }
-impl<E: AsyncCollectiveEpImpl> AsyncCollectiveEpImpl for EndpointBase<E, Connectionless> {}
+impl<E: AsyncCollectiveEpImpl, MRREQ: EpMrReq> AsyncCollectiveEpImpl
+    for EndpointBase<E, Connectionless, MRREQ>
+{
+}
 
-impl<E: AsyncCollectiveEpImpl> AsyncCollectiveEpImpl for EndpointBase<E, Connected> {}
+impl<E: AsyncCollectiveEpImpl, MRREQ: EpMrReq> AsyncCollectiveEpImpl
+    for EndpointBase<E, Connected, MRREQ>
+{
+}
 
 impl<EP: AsyncCollectiveEpImpl + AsyncTxEp + AsyncCmEp> AsyncCollectiveEp for EP {
     #[inline]

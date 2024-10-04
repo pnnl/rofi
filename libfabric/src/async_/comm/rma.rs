@@ -2,7 +2,7 @@ use crate::async_::ep::AsyncTxEp;
 use crate::comm::rma::{ConnectedWriteEp, ReadEpImpl, WriteEp, WriteEpImpl};
 use crate::conn_ep::ConnectedEp;
 use crate::connless_ep::ConnlessEp;
-use crate::ep::{Connected, Connectionless, EndpointImplBase};
+use crate::ep::{Connected, Connectionless, EndpointImplBase, EpMrReq};
 use crate::infocapsoptions::RmaCap;
 use crate::msg::{MsgRma, MsgRmaConnected, MsgRmaConnectedMut, MsgRmaMut};
 use crate::utils::Either;
@@ -230,8 +230,11 @@ impl<EP: RmaCap + ReadMod, EQ: ?Sized + AsyncReadEq, CQ: AsyncReadCq + ?Sized> A
 {
 }
 
-impl<E: AsyncReadEpImpl> AsyncReadEpImpl for EndpointBase<E, Connected> {}
-impl<E: AsyncReadEpImpl> AsyncReadEpImpl for EndpointBase<E, Connectionless> {}
+impl<E: AsyncReadEpImpl, MRREQ: EpMrReq> AsyncReadEpImpl for EndpointBase<E, Connected, MRREQ> {}
+impl<E: AsyncReadEpImpl, MRREQ: EpMrReq> AsyncReadEpImpl
+    for EndpointBase<E, Connectionless, MRREQ>
+{
+}
 
 impl<EP: AsyncReadEpImpl> AsyncReadEp for EP {
     async unsafe fn read_from_async<T0>(
@@ -673,7 +676,7 @@ impl<EP: RmaCap + WriteMod, EQ: ?Sized + AsyncReadEq, CQ: AsyncReadCq + ?Sized> 
 {
 }
 
-impl<E: AsyncWriteEpImpl> AsyncWriteEpImpl for EndpointBase<E, Connected> {
+impl<E: AsyncWriteEpImpl, MRREQ: EpMrReq> AsyncWriteEpImpl for EndpointBase<E, Connected, MRREQ> {
     async unsafe fn write_async_impl<T>(
         &self,
         buf: &[T],
@@ -734,7 +737,9 @@ impl<E: AsyncWriteEpImpl> AsyncWriteEpImpl for EndpointBase<E, Connected> {
     }
 }
 
-impl<E: AsyncWriteEpImpl> AsyncWriteEpImpl for EndpointBase<E, Connectionless> {
+impl<E: AsyncWriteEpImpl, MRREQ: EpMrReq> AsyncWriteEpImpl
+    for EndpointBase<E, Connectionless, MRREQ>
+{
     async unsafe fn write_async_impl<T>(
         &self,
         buf: &[T],
