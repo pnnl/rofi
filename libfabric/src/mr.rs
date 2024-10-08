@@ -1,3 +1,5 @@
+use std::{marker::PhantomData, ops::Range};
+
 #[allow(unused_imports)]
 use crate::fid::AsFid;
 use crate::{
@@ -180,6 +182,7 @@ pub(crate) struct MemoryRegionImpl {
     pub(crate) _domain_rc: MyRc<dyn DomainImplT>,
     pub(crate) bound_cntr: MyOnceCell<MyRc<dyn ReadCntr>>,
     pub(crate) bound_ep: MyOnceCell<MyRc<dyn AsRawFid>>,
+    pub(crate) iovs: Vec<Range<usize>>,
 }
 
 /// Owned wrapper around a libfabric `fid_mr`.
@@ -228,6 +231,9 @@ impl MemoryRegionImpl {
                 _domain_rc: domain.clone(),
                 bound_cntr: MyOnceCell::new(),
                 bound_ep: MyOnceCell::new(),
+                iovs: vec![
+                    buf.as_ptr() as usize..buf.as_ptr() as usize + std::mem::size_of_val(buf),
+                ],
             })
         }
     }
@@ -254,11 +260,17 @@ impl MemoryRegionImpl {
                 (-err).try_into().unwrap(),
             ))
         } else {
+            let c_iovs =
+                unsafe { std::slice::from_raw_parts(attr.c_attr.mr_iov, attr.c_attr.iov_count) };
             Ok(Self {
                 c_mr: OwnedMrFid::from(c_mr),
                 _domain_rc: domain.clone(),
                 bound_cntr: MyOnceCell::new(),
                 bound_ep: MyOnceCell::new(),
+                iovs: c_iovs
+                    .into_iter()
+                    .map(|c_iov| c_iov.iov_base as usize..c_iov.iov_base as usize + c_iov.iov_len)
+                    .collect::<Vec<Range<usize>>>(),
             })
         }
     }
@@ -298,6 +310,13 @@ impl MemoryRegionImpl {
                 _domain_rc: domain.clone(),
                 bound_cntr: MyOnceCell::new(),
                 bound_ep: MyOnceCell::new(),
+                iovs: iov
+                    .into_iter()
+                    .map(|iov| {
+                        iov.c_iovec.iov_base as usize
+                            ..iov.c_iovec.iov_base as usize + iov.c_iovec.iov_len
+                    })
+                    .collect::<Vec<Range<usize>>>(),
             })
         }
     }
@@ -453,6 +472,20 @@ impl MemoryRegionImpl {
 
         MemoryRegionDesc { c_desc }
     }
+
+    pub(crate) fn slice(&self, index: usize) -> MemoryRegionSlice<u8> {
+        // println!(
+        //     "start: {:?}, end: {:?}, len: {:?}",
+        //     self.iovs[index].start,
+        //     self.iovs[index].end,
+        //     self.iovs[index].len()
+        // );
+        MemoryRegionSlice::<u8> {
+            start: self.iovs[index].start,
+            len: self.iovs[index].len(),
+            phantom: PhantomData,
+        }
+    }
 }
 
 impl MemoryRegion {
@@ -578,6 +611,10 @@ impl MemoryRegion {
     pub fn description(&self) -> MemoryRegionDesc {
         self.inner.description()
     }
+
+    pub fn slice(&self, index: usize) -> MemoryRegionSlice<u8> {
+        self.inner.slice(index)
+    }
 }
 
 /// An opaque wrapper for the descriptor of a [MemoryRegion] as obtained from
@@ -650,33 +687,62 @@ impl AsRawTypedFid for MemoryRegionImpl {
     }
 }
 
-pub struct MemoryRegionSlice<'a, DATA: Copy> {
-    pub slice: &'a mut [DATA],
+pub struct MemoryRegionSlice<DATA: Copy> {
+    pub start: usize,
+    pub len: usize,
+    phantom: PhantomData<DATA>,
 }
 
-impl<'a, DATA: Copy> MemoryRegionSlice<'a, DATA> {
-    pub fn split_at(
-        &'a mut self,
-        mid: usize,
-    ) -> (MemoryRegionSlice<'a, DATA>, MemoryRegionSlice<'a, DATA>) {
-        let (s0, s1) = self.slice.split_at_mut(mid);
-        (
-            MemoryRegionSlice::<'a, DATA> { slice: s0 },
-            MemoryRegionSlice::<'a, DATA> { slice: s1 },
-        )
+// pub struct MemoryRegionSlice<'a, DATA: Copy> {
+//     pub slice: &'a mut [DATA],
+// }
+
+impl<DATA: Copy> MemoryRegionSlice<DATA> {
+    pub fn len(&self) -> usize {
+        self.len
     }
-}
+    //     pub fn split_at(
+    //         &'a mut self,
+    //         mid: usize,
+    //     ) -> (MemoryRegionSlice<'a, DATA>, MemoryRegionSlice<'a, DATA>) {
+    //         let (s0, s1) = self.slice.split_at_mut(mid);
+    //         (
+    //             MemoryRegionSlice::<'a, DATA> { slice: s0 },
+    //             MemoryRegionSlice::<'a, DATA> { slice: s1 },
+    //         )
+    //     }
 
-impl<'a, DATA: Copy> MemoryRegionSlice<'a, DATA> {
-    pub fn slice<Idx>(&'a mut self, index: Idx) -> MemoryRegionSlice<'a, DATA>
+    pub fn slice<Idx>(&self, index: Idx) -> MemoryRegionSlice<DATA>
     where
         Idx: std::slice::SliceIndex<[DATA], Output = [DATA]>,
     {
-        MemoryRegionSlice::<'a, DATA> {
-            slice: &mut self.slice[index],
+        let slice = unsafe { std::slice::from_raw_parts(self.start as *const DATA, self.len) };
+        let new_slice = &slice[index];
+        // println!(
+        //     "New slice: len_init: {:?}, ptr: {:?}, size: {:?}, len: {:?}, size_of_data: ",
+        //     self.len,
+        //     new_slice.as_ptr() as usize,
+        //     std::mem::size_of_val(new_slice),
+        //     new_slice.len(),
+        // );
+        MemoryRegionSlice::<DATA> {
+            start: new_slice.as_ptr() as usize,
+            len: std::mem::size_of_val(new_slice),
+            phantom: PhantomData,
         }
     }
 }
+
+// impl<'a, DATA: Copy> MemoryRegionSlice<'a, DATA> {
+//     pub fn slice<Idx>(&'a mut self, index: Idx) -> MemoryRegionSlice<'a, DATA>
+//     where
+//         Idx: std::slice::SliceIndex<[DATA], Output = [DATA]>,
+//     {
+//         MemoryRegionSlice::<'a, DATA> {
+//             slice: &mut self.slice[index],
+//         }
+//     }
+// }
 
 //================== Memory Region attribute ==================//
 
@@ -1197,17 +1263,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn try_wrapper() {
-        let mut vec = vec![0u8; 10];
-        let mut wrapped_vec = MemoryRegionSlice {
-            slice: &mut vec[..],
-        };
-        wrapped_vec.slice(0..4);
-        // let (w0, w1) = wrapped_vec.split_at(5);
-        // vec[0] = 1;
-        // let new_wrapped = wrapped_vec.slice();
-    }
+    // #[test]
+    // fn try_wrapper() {
+    //     let mut vec = vec![0u8; 10];
+    //     let mut wrapped_vec = MemoryRegionSlice {
+    //         slice: &mut vec[..],
+    //     };
+    //     wrapped_vec.slice(0..4);
+    //     // let (w0, w1) = wrapped_vec.split_at(5);
+    //     // vec[0] = 1;
+    //     // let new_wrapped = wrapped_vec.slice();
+    // }
 }
 
 #[cfg(test)]

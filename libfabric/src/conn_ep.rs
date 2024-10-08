@@ -167,7 +167,7 @@ impl<EP: AsRawTypedFid<Output = EpRawFid>> UnconnectedMrLocalEndpointBase<EP> {
 }
 
 impl<E> UnconnectedMrLocalEndpoint<E> {
-    pub fn connect_complete(self, event: ConnectedEvent) -> ConnectedEndpoint<E> {
+    pub fn connect_complete(self, event: ConnectedEvent) -> ConnectedMrLocalEndpoint<E> {
         // TODO: Create a type specifically for each event type
 
         assert_eq!(event.get_fid(), self.as_raw_fid());
@@ -193,6 +193,7 @@ impl<E> UnconnectedEndpoint<E> {
 }
 
 pub trait ConnectedEp {}
+pub trait ConnectedMrLocalEp {}
 
 pub type ConnectedEndpointBase<EP> = EndpointBase<EP, Connected, MrNone>;
 
@@ -201,11 +202,53 @@ pub type ConnectedEndpoint<T> = ConnectedEndpointBase<EndpointImplBase<T, dyn Re
 pub type ConnectedMrLocalEndpointBase<EP> = EndpointBase<EP, Connected, MrLocal>;
 
 pub type ConnectedMrLocalEndpoint<T> =
-    ConnectedEndpointBase<EndpointImplBase<T, dyn ReadEq, dyn ReadCq>>;
+    ConnectedMrLocalEndpointBase<EndpointImplBase<T, dyn ReadEq, dyn ReadCq>>;
 
 impl<EP> ConnectedEp for ConnectedEndpointBase<EP> {}
+impl<EP> ConnectedMrLocalEp for ConnectedMrLocalEndpointBase<EP> {}
 
 impl<EP: AsRawTypedFid<Output = EpRawFid>> ConnectedEndpointBase<EP> {
+    pub fn shutdown(&self) -> Result<(), crate::error::Error> {
+        let err = unsafe { libfabric_sys::inlined_fi_shutdown(self.as_raw_typed_fid(), 0) };
+
+        check_error(err.try_into().unwrap())
+    }
+
+    pub fn peer(&self) -> Result<Address, crate::error::Error> {
+        let mut len = 0;
+        let err = unsafe {
+            libfabric_sys::inlined_fi_getpeer(
+                self.as_raw_typed_fid(),
+                std::ptr::null_mut(),
+                &mut len,
+            )
+        };
+
+        if -err as u32 == libfabric_sys::FI_ETOOSMALL {
+            let mut address = vec![0; len];
+            let err = unsafe {
+                libfabric_sys::inlined_fi_getpeer(
+                    self.as_raw_typed_fid(),
+                    address.as_mut_ptr().cast(),
+                    &mut len,
+                )
+            };
+            if err != 0 {
+                Err(crate::error::Error::from_err_code(
+                    (-err).try_into().unwrap(),
+                ))
+            } else {
+                Ok(Address { address })
+            }
+        } else {
+            Err(crate::error::Error::from_err_code(
+                (-err).try_into().unwrap(),
+            ))
+        }
+    }
+}
+
+impl<EP: AsRawTypedFid<Output = EpRawFid>> ConnectedMrLocalEndpointBase<EP> {
     pub fn shutdown(&self) -> Result<(), crate::error::Error> {
         let err = unsafe { libfabric_sys::inlined_fi_shutdown(self.as_raw_typed_fid(), 0) };
 

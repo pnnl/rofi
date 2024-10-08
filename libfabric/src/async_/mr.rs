@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use super::AsyncCtx;
 use crate::domain::DomainBase;
 use crate::enums::{MrMode, MrRegOpt};
@@ -61,6 +63,10 @@ impl MemoryRegionImpl {
                             _domain_rc: domain.clone(),
                             bound_cntr: MyOnceCell::new(),
                             bound_ep: MyOnceCell::new(),
+                            iovs: vec![
+                                buf.as_ptr() as usize
+                                    ..buf.as_ptr() as usize + std::mem::size_of_val(buf),
+                            ],
                         },
                     ));
                 }
@@ -115,7 +121,9 @@ impl MemoryRegionImpl {
                             attr.c_attr.context as usize,
                         )
                         .await?;
-
+                    let c_iovs = unsafe {
+                        std::slice::from_raw_parts(attr.c_attr.mr_iov, attr.c_attr.iov_count)
+                    };
                     return Ok((
                         res,
                         Self {
@@ -123,6 +131,12 @@ impl MemoryRegionImpl {
                             _domain_rc: domain.clone(),
                             bound_cntr: MyOnceCell::new(),
                             bound_ep: MyOnceCell::new(),
+                            iovs: c_iovs
+                                .into_iter()
+                                .map(|c_iov| {
+                                    c_iov.iov_base as usize..c_iov.iov_base as usize + c_iov.iov_len
+                                })
+                                .collect::<Vec<Range<usize>>>(),
                         },
                     ));
                 }
@@ -183,6 +197,13 @@ impl MemoryRegionImpl {
                             _domain_rc: domain.clone(),
                             bound_cntr: MyOnceCell::new(),
                             bound_ep: MyOnceCell::new(),
+                            iovs: iov
+                                .into_iter()
+                                .map(|iov| {
+                                    iov.c_iovec.iov_base as usize
+                                        ..iov.c_iovec.iov_base as usize + iov.c_iovec.iov_len
+                                })
+                                .collect::<Vec<Range<usize>>>(),
                         },
                     ));
                 }

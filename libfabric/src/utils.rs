@@ -15,7 +15,9 @@ pub(crate) fn error_to_string(errnum: i64) -> String {
 }
 
 #[derive(Clone)]
-pub enum Either<L, R> {
-    Left(L),
-    Right(R),
+pub enum MsgType<L, R, LL, RR> {
+    ConnectionlessMsg(L),
+    ConnectionlessMrMsg(LL),
+    ConnectedMsg(R),
+    ConnectedMrMsg(RR),
 }

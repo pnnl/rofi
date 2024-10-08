@@ -30,9 +30,11 @@ pub type UninitConnectionlessEndpoint<E> =
     UninitConnectionlessEndpointBase<EndpointImplBase<E, dyn ReadEq, dyn ReadCq>>;
 
 pub trait ConnlessEp {}
-pub trait ConnlessMrEp {}
+pub trait ConnlessMrLocalEp {}
 
 impl<EP> ConnlessEp for ConnectionlessEndpointBase<EP> {}
+impl<EP> ConnlessMrLocalEp for ConnectionlessMrLocalEndpointBase<EP> {}
+
 impl<EP: AsRawTypedFid<Output = EpRawFid> + AsRawFid> UninitEndpoint
     for UninitConnectionlessEndpointBase<EP>
 {

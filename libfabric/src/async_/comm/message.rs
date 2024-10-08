@@ -9,7 +9,7 @@ use crate::conn_ep::ConnectedEp;
 use crate::connless_ep::ConnlessEp;
 use crate::ep::{Connected, Connectionless, EndpointImplBase, EpMrReq};
 use crate::infocapsoptions::{MsgCap, RecvMod, SendMod};
-use crate::utils::Either;
+use crate::utils::MsgType;
 use crate::{
     async_::{cq::AsyncReadCq, eq::AsyncReadEq, AsyncCtx},
     cq::SingleCompletion,
@@ -59,14 +59,21 @@ pub(crate) trait AsyncRecvEpImpl: AsyncRxEp + RecvEpImpl {
 
     async fn recvmsg_async_impl<'a>(
         &self,
-        mut msg: Either<&mut crate::msg::MsgMut<'a>, &mut crate::msg::MsgConnectedMut<'a>>,
+        mut msg: MsgType<
+            &mut crate::msg::MsgMut<'a>,
+            &mut crate::msg::MsgConnectedMut<'a>,
+            &mut crate::msg::MsgMutMr<'a>,
+            &mut crate::msg::MsgConnectedMutMr<'a>,
+        >,
         options: RecvMsgOptions,
     ) -> Result<SingleCompletion, crate::error::Error> {
         let mut async_ctx;
         let real_user_ctx = {
             let c_msg = match &mut msg {
-                Either::Left(msg) => &mut msg.c_msg,
-                Either::Right(msg) => &mut msg.c_msg,
+                MsgType::ConnectionlessMsg(msg) => &mut msg.c_msg,
+                MsgType::ConnectedMsg(msg) => &mut msg.c_msg,
+                MsgType::ConnectionlessMrMsg(msg) => &mut msg.c_msg,
+                MsgType::ConnectedMrMsg(msg) => &mut msg.c_msg,
             };
 
             let real_user_ctx = c_msg.context;
@@ -83,14 +90,18 @@ pub(crate) trait AsyncRecvEpImpl: AsyncRxEp + RecvEpImpl {
         };
 
         let imm_msg = match &msg {
-            Either::Left(msg) => Either::Left(&**msg),
-            Either::Right(msg) => Either::Right(&**msg),
+            MsgType::ConnectionlessMsg(msg) => MsgType::ConnectionlessMsg(&**msg),
+            MsgType::ConnectedMsg(msg) => MsgType::ConnectedMsg(&**msg),
+            MsgType::ConnectionlessMrMsg(msg) => MsgType::ConnectionlessMrMsg(&**msg),
+            MsgType::ConnectedMrMsg(msg) => MsgType::ConnectedMrMsg(&**msg),
         };
 
         let err = self.recvmsg_impl(imm_msg, options);
         let c_msg = match &mut msg {
-            Either::Left(msg) => &mut msg.c_msg,
-            Either::Right(msg) => &mut msg.c_msg,
+            MsgType::ConnectionlessMsg(msg) => &mut msg.c_msg,
+            MsgType::ConnectedMsg(msg) => &mut msg.c_msg,
+            MsgType::ConnectionlessMrMsg(msg) => &mut msg.c_msg,
+            MsgType::ConnectedMrMsg(msg) => &mut msg.c_msg,
         };
 
         if err.is_err() {
@@ -234,7 +245,7 @@ impl<EP: AsyncRecvEpImpl + ConnlessEp> AsyncRecvEp for EP {
         msg: &mut crate::msg::MsgMut,
         options: RecvMsgOptions,
     ) -> impl std::future::Future<Output = Result<SingleCompletion, crate::error::Error>> {
-        self.recvmsg_async_impl(Either::Left(msg), options)
+        self.recvmsg_async_impl(MsgType::ConnectionlessMsg(msg), options)
     }
 }
 
@@ -278,7 +289,7 @@ impl<EP: AsyncRecvEpImpl + ConnectedEp> ConnectedAsyncRecvEp for EP {
         msg: &mut crate::msg::MsgConnectedMut,
         options: RecvMsgOptions,
     ) -> impl std::future::Future<Output = Result<SingleCompletion, crate::error::Error>> {
-        self.recvmsg_async_impl(Either::Right(msg), options)
+        self.recvmsg_async_impl(MsgType::ConnectedMsg(msg), options)
     }
 }
 
@@ -321,14 +332,21 @@ pub(crate) trait AsyncSendEpImpl: AsyncTxEp + SendEpImpl {
 
     async fn sendmsg_async_impl<'a>(
         &self,
-        mut msg: Either<&mut crate::msg::Msg<'a>, &mut crate::msg::MsgConnected<'a>>,
+        mut msg: MsgType<
+            &mut crate::msg::Msg<'a>,
+            &mut crate::msg::MsgConnected<'a>,
+            &mut crate::msg::MsgMr<'a>,
+            &mut crate::msg::MsgConnectedMr<'a>,
+        >,
         options: SendMsgOptions,
     ) -> Result<SingleCompletion, crate::error::Error> {
         let mut async_ctx;
         let real_user_ctx = {
             let c_msg = match &mut msg {
-                Either::Left(msg) => &mut msg.c_msg,
-                Either::Right(msg) => &mut msg.c_msg,
+                MsgType::ConnectionlessMsg(msg) => &mut msg.c_msg,
+                MsgType::ConnectedMsg(msg) => &mut msg.c_msg,
+                MsgType::ConnectionlessMrMsg(msg) => &mut msg.c_msg,
+                MsgType::ConnectedMrMsg(msg) => &mut msg.c_msg,
             };
 
             let real_user_ctx = c_msg.context;
@@ -345,14 +363,18 @@ pub(crate) trait AsyncSendEpImpl: AsyncTxEp + SendEpImpl {
         };
 
         let imm_msg = match &msg {
-            Either::Left(msg) => Either::Left(&**msg),
-            Either::Right(msg) => Either::Right(&**msg),
+            MsgType::ConnectionlessMsg(msg) => MsgType::ConnectionlessMsg(&**msg),
+            MsgType::ConnectedMsg(msg) => MsgType::ConnectedMsg(&**msg),
+            MsgType::ConnectionlessMrMsg(msg) => MsgType::ConnectionlessMrMsg(&**msg),
+            MsgType::ConnectedMrMsg(msg) => MsgType::ConnectedMrMsg(&**msg),
         };
 
         let err = self.sendmsg_impl(imm_msg, options);
         let c_msg = match &mut msg {
-            Either::Left(msg) => &mut msg.c_msg,
-            Either::Right(msg) => &mut msg.c_msg,
+            MsgType::ConnectionlessMsg(msg) => &mut msg.c_msg,
+            MsgType::ConnectedMsg(msg) => &mut msg.c_msg,
+            MsgType::ConnectionlessMrMsg(msg) => &mut msg.c_msg,
+            MsgType::ConnectedMrMsg(msg) => &mut msg.c_msg,
         };
 
         if err.is_err() {
@@ -540,7 +562,8 @@ impl<EP: AsyncSendEpImpl + ConnlessEp> AsyncSendEp for EP {
         msg: &mut crate::msg::Msg<'a>,
         options: SendMsgOptions,
     ) -> Result<SingleCompletion, crate::error::Error> {
-        self.sendmsg_async_impl(Either::Left(msg), options).await
+        self.sendmsg_async_impl(MsgType::ConnectionlessMsg(msg), options)
+            .await
     }
 
     async fn senddata_to_async<T>(
@@ -616,7 +639,8 @@ impl<EP: AsyncSendEpImpl + ConnectedEp> ConnectedAsyncSendEp for EP {
         msg: &mut crate::msg::MsgConnected<'a>,
         options: SendMsgOptions,
     ) -> Result<SingleCompletion, crate::error::Error> {
-        self.sendmsg_async_impl(Either::Right(msg), options).await
+        self.sendmsg_async_impl(MsgType::ConnectedMsg(msg), options)
+            .await
     }
 
     async fn senddata_async<T>(

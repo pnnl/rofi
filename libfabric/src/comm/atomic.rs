@@ -1,6 +1,8 @@
 use super::message::extract_raw_addr_and_ctx;
 use crate::conn_ep::ConnectedEp;
+use crate::conn_ep::ConnectedMrLocalEp;
 use crate::connless_ep::ConnlessEp;
+use crate::connless_ep::ConnlessMrLocalEp;
 use crate::cq::ReadCq;
 use crate::enums::AtomicFetchMsgOptions;
 use crate::enums::AtomicMsgOptions;
@@ -17,9 +19,10 @@ use crate::infocapsoptions::ReadMod;
 use crate::infocapsoptions::WriteMod;
 use crate::mr::DataDescriptor;
 use crate::mr::MappedMemoryRegionKey;
+use crate::mr::MemoryRegionSlice;
 use crate::trigger::TriggeredContext;
 use crate::utils::check_error;
-use crate::utils::Either;
+use crate::utils::MsgType;
 use crate::xcontext::RxContextBase;
 use crate::xcontext::RxContextImplBase;
 use crate::xcontext::TxContextBase;
@@ -89,14 +92,50 @@ pub(crate) trait AtomicWriteEpImpl:
         check_error(err)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn atomicv_mr_impl<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        dest_addr: Option<&crate::MappedAddress>,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: Option<*mut std::ffi::c_void>,
+    ) -> Result<(), crate::error::Error> {
+        let (raw_addr, ctx) = extract_raw_addr_and_ctx(dest_addr, context);
+        let err = unsafe {
+            libfabric_sys::inlined_fi_atomicv(
+                self.as_raw_typed_fid(),
+                ioc.as_ptr().cast(),
+                desc.as_mut_ptr().cast(),
+                ioc.len(),
+                raw_addr,
+                mem_addr,
+                mapped_key.get_key(),
+                T::as_fi_datatype(),
+                op.as_raw(),
+                ctx,
+            )
+        };
+        check_error(err)
+    }
+
     fn atomicmsg_impl<T: AsFiType>(
         &self,
-        msg: Either<&crate::msg::MsgAtomic<T>, &crate::msg::MsgAtomicConnected<T>>,
+        msg: MsgType<
+            &crate::msg::MsgAtomic<T>,
+            &crate::msg::MsgAtomicConnected<T>,
+            &crate::msg::MsgAtomicMr<T>,
+            &crate::msg::MsgAtomicConnectedMr<T>,
+        >,
         options: AtomicMsgOptions,
     ) -> Result<(), crate::error::Error> {
         let c_atomic_msg = match msg {
-            Either::Left(msg) => msg.get(),
-            Either::Right(msg) => msg.get(),
+            MsgType::ConnectionlessMsg(msg) => msg.get(),
+            MsgType::ConnectedMsg(msg) => msg.get(),
+            MsgType::ConnectionlessMrMsg(msg) => msg.get(),
+            MsgType::ConnectedMrMsg(msg) => msg.get(),
         };
 
         let err = unsafe {
@@ -285,6 +324,152 @@ pub trait ConnectedAtomicWriteEp {
     ) -> Result<(), crate::error::Error>;
 }
 
+pub trait AtomicWriteMrEp {
+    unsafe fn atomic_to<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn atomic_to_with_context<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn atomic_to_triggered<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn atomicv_to<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn atomicv_to_with_context<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn atomicv_to_triggered<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    unsafe fn atomicmsg_to<T: AsFiType + Copy>(
+        &self,
+        msg: &crate::msg::MsgAtomicMr<T>,
+        options: AtomicMsgOptions,
+    ) -> Result<(), crate::error::Error>;
+    unsafe fn inject_atomic_to<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+    ) -> Result<(), crate::error::Error>;
+}
+
+pub trait ConnectedAtomicWriteMrEp {
+    unsafe fn atomic<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+    ) -> Result<(), crate::error::Error>;
+    unsafe fn atomic_with_context<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    unsafe fn atomic_triggered<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    unsafe fn atomicv<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+    ) -> Result<(), crate::error::Error>;
+    unsafe fn atomicv_with_context<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    unsafe fn atomicv_triggered<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    unsafe fn atomicmsg<T: AsFiType + Copy>(
+        &self,
+        msg: &crate::msg::MsgAtomicConnectedMr<T>,
+        options: AtomicMsgOptions,
+    ) -> Result<(), crate::error::Error>;
+    unsafe fn inject_atomic<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+    ) -> Result<(), crate::error::Error>;
+}
+
 impl<EP: AtomicWriteEpImpl + ConnlessEp> AtomicWriteEp for EP {
     #[inline]
     unsafe fn atomic_to<T: AsFiType>(
@@ -406,7 +591,7 @@ impl<EP: AtomicWriteEpImpl + ConnlessEp> AtomicWriteEp for EP {
         msg: &crate::msg::MsgAtomic<T>,
         options: AtomicMsgOptions,
     ) -> Result<(), crate::error::Error> {
-        self.atomicmsg_impl(Either::Left(msg), options)
+        self.atomicmsg_impl(MsgType::ConnectionlessMsg(msg), options)
     }
 
     #[inline]
@@ -541,7 +726,7 @@ impl<EP: AtomicWriteEpImpl + ConnectedEp> ConnectedAtomicWriteEp for EP {
         msg: &crate::msg::MsgAtomicConnected<T>,
         options: AtomicMsgOptions,
     ) -> Result<(), crate::error::Error> {
-        self.atomicmsg_impl(Either::Right(msg), options)
+        self.atomicmsg_impl(MsgType::ConnectedMsg(msg), options)
     }
 
     #[inline]
@@ -554,6 +739,303 @@ impl<EP: AtomicWriteEpImpl + ConnectedEp> ConnectedAtomicWriteEp for EP {
         op: crate::enums::AtomicOp,
     ) -> Result<(), crate::error::Error> {
         self.inject_atomic_impl(buf, None, mem_addr, mapped_key, op)
+    }
+}
+
+impl<EP: AtomicWriteEpImpl + ConnlessMrLocalEp> AtomicWriteMrEp for EP {
+    #[inline]
+    unsafe fn atomic_to<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.atomic_impl(slice, desc, Some(dest_addr), mem_addr, mapped_key, op, None)
+    }
+
+    #[inline]
+    unsafe fn atomic_to_with_context<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.atomic_impl(
+            slice,
+            desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    unsafe fn atomic_to_triggered<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.atomic_impl(
+            slice,
+            desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    unsafe fn atomicv_to<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+    ) -> Result<(), crate::error::Error> {
+        self.atomicv_mr_impl(ioc, desc, Some(dest_addr), mem_addr, mapped_key, op, None)
+    }
+
+    #[inline]
+    unsafe fn atomicv_to_with_context<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        self.atomicv_mr_impl(
+            ioc,
+            desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    unsafe fn atomicv_to_triggered<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        self.atomicv_mr_impl(
+            ioc,
+            desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    unsafe fn atomicmsg_to<T: AsFiType + Copy>(
+        &self,
+        msg: &crate::msg::MsgAtomicMr<T>,
+        options: AtomicMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        self.atomicmsg_impl(MsgType::ConnectionlessMrMsg(msg), options)
+    }
+
+    #[inline]
+    unsafe fn inject_atomic_to<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.inject_atomic_impl(slice, Some(dest_addr), mem_addr, mapped_key, op)
+    }
+}
+impl<EP: AtomicWriteEpImpl + ConnectedMrLocalEp> ConnectedAtomicWriteMrEp for EP {
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn atomic<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.atomic_impl(slice, desc, None, mem_addr, mapped_key, op, None)
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn atomic_with_context<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.atomic_impl(
+            slice,
+            desc,
+            None,
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn atomic_triggered<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.atomic_impl(
+            slice,
+            desc,
+            None,
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn atomicv<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+    ) -> Result<(), crate::error::Error> {
+        self.atomicv_mr_impl(ioc, desc, None, mem_addr, mapped_key, op, None)
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn atomicv_with_context<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        self.atomicv_mr_impl(
+            ioc,
+            desc,
+            None,
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn atomicv_triggered<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        self.atomicv_mr_impl(
+            ioc,
+            desc,
+            None,
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    unsafe fn atomicmsg<T: AsFiType + Copy>(
+        &self,
+        msg: &crate::msg::MsgAtomicConnectedMr<T>,
+        options: AtomicMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        self.atomicmsg_impl(MsgType::ConnectedMrMsg(msg), options)
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn inject_atomic<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::AtomicOp,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+
+        self.inject_atomic_impl(slice, None, mem_addr, mapped_key, op)
     }
 }
 
@@ -638,16 +1120,89 @@ pub(crate) trait AtomicFetchEpImpl:
         check_error(err)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn fetch_atomicv_mr_impl<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        dest_addr: Option<&crate::MappedAddress>,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: Option<*mut std::ffi::c_void>,
+    ) -> Result<(), crate::error::Error> {
+        let (raw_addr, ctx) = extract_raw_addr_and_ctx(dest_addr, context);
+        let err = unsafe {
+            libfabric_sys::inlined_fi_fetch_atomicv(
+                self.as_raw_typed_fid(),
+                ioc.as_ptr().cast(),
+                desc.as_mut_ptr().cast(),
+                ioc.len(),
+                resultv.as_mut_ptr().cast(),
+                res_desc.as_mut_ptr().cast(),
+                resultv.len(),
+                raw_addr,
+                mem_addr,
+                mapped_key.get_key(),
+                T::as_fi_datatype(),
+                op.as_raw(),
+                ctx,
+            )
+        };
+        check_error(err)
+    }
+
     fn fetch_atomicmsg_impl<T: AsFiType>(
         &self,
-        msg: Either<&crate::msg::MsgFetchAtomic<T>, &crate::msg::MsgFetchAtomicConnected<T>>,
+        msg: MsgType<
+            &crate::msg::MsgFetchAtomic<T>,
+            &crate::msg::MsgFetchAtomicConnected<T>,
+            &crate::msg::MsgFetchAtomicMr<T>,
+            &crate::msg::MsgFetchAtomicConnectedMr<T>,
+        >,
         resultv: &mut [crate::iovec::IocMut<T>],
         res_desc: &mut [impl DataDescriptor],
         options: AtomicFetchMsgOptions,
     ) -> Result<(), crate::error::Error> {
         let c_atomic_msg = match msg {
-            Either::Left(msg) => msg.get(),
-            Either::Right(msg) => msg.get(),
+            MsgType::ConnectionlessMsg(msg) => msg.get(),
+            MsgType::ConnectedMsg(msg) => msg.get(),
+            MsgType::ConnectionlessMrMsg(msg) => msg.get(),
+            MsgType::ConnectedMrMsg(msg) => msg.get(),
+        };
+
+        let err = unsafe {
+            libfabric_sys::inlined_fi_fetch_atomicmsg(
+                self.as_raw_typed_fid(),
+                c_atomic_msg,
+                resultv.as_mut_ptr().cast(),
+                res_desc.as_mut_ptr().cast(),
+                resultv.len(),
+                options.as_raw(),
+            )
+        };
+        check_error(err)
+    }
+
+    fn fetch_atomicmsg_mr_impl<T: AsFiType>(
+        &self,
+        msg: MsgType<
+            &crate::msg::MsgFetchAtomic<T>,
+            &crate::msg::MsgFetchAtomicConnected<T>,
+            &crate::msg::MsgFetchAtomicMr<T>,
+            &crate::msg::MsgFetchAtomicConnectedMr<T>,
+        >,
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        options: AtomicFetchMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        let c_atomic_msg = match msg {
+            MsgType::ConnectionlessMsg(msg) => msg.get(),
+            MsgType::ConnectedMsg(msg) => msg.get(),
+            MsgType::ConnectionlessMrMsg(msg) => msg.get(),
+            MsgType::ConnectedMrMsg(msg) => msg.get(),
         };
 
         let err = unsafe {
@@ -829,6 +1384,171 @@ pub trait ConnectedAtomicFetchEp {
     ) -> Result<(), crate::error::Error>;
 }
 
+pub trait AtomicFetchMrEp {
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomic_from<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        res: &mut MemoryRegionSlice<T>,
+        res_desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomic_from_with_context<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        res: &mut MemoryRegionSlice<T>,
+        res_desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomic_from_triggered<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        res: &mut MemoryRegionSlice<T>,
+        res_desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomicv_from<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomicv_from_with_context<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomicv_from_triggered<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    unsafe fn fetch_atomicmsg_from<T: AsFiType + Copy>(
+        &self,
+        msg: &crate::msg::MsgFetchAtomicMr<T>,
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        options: AtomicFetchMsgOptions,
+    ) -> Result<(), crate::error::Error>;
+}
+pub trait ConnectedAtomicFetchMrEp {
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomic<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        res: &mut MemoryRegionSlice<T>,
+        res_desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomic_with_context<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        res: &mut MemoryRegionSlice<T>,
+        res_desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomic_triggered<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        res: &mut MemoryRegionSlice<T>,
+        res_desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomicv<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomicv_with_context<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomicv_triggered<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    unsafe fn fetch_atomicmsg<T: AsFiType + Copy>(
+        &self,
+        msg: &crate::msg::MsgFetchAtomicConnectedMr<T>,
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        options: AtomicFetchMsgOptions,
+    ) -> Result<(), crate::error::Error>;
+}
+
 impl<EP: AtomicFetchEpImpl + ConnlessEp> AtomicFetchEp for EP {
     #[allow(clippy::too_many_arguments)]
     unsafe fn fetch_atomic_from<T: AsFiType>(
@@ -985,7 +1705,7 @@ impl<EP: AtomicFetchEpImpl + ConnlessEp> AtomicFetchEp for EP {
         res_desc: &mut [impl DataDescriptor],
         options: AtomicFetchMsgOptions,
     ) -> Result<(), crate::error::Error> {
-        self.fetch_atomicmsg_impl(Either::Left(msg), resultv, res_desc, options)
+        self.fetch_atomicmsg_impl(MsgType::ConnectionlessMsg(msg), resultv, res_desc, options)
     }
 }
 impl<EP: AtomicFetchEpImpl + ConnectedEp> ConnectedAtomicFetchEp for EP {
@@ -1128,7 +1848,351 @@ impl<EP: AtomicFetchEpImpl + ConnectedEp> ConnectedAtomicFetchEp for EP {
         res_desc: &mut [impl DataDescriptor],
         options: AtomicFetchMsgOptions,
     ) -> Result<(), crate::error::Error> {
-        self.fetch_atomicmsg_impl(Either::Right(msg), resultv, res_desc, options)
+        self.fetch_atomicmsg_impl(MsgType::ConnectedMsg(msg), resultv, res_desc, options)
+    }
+}
+
+impl<EP: AtomicFetchEpImpl + ConnlessMrLocalEp> AtomicFetchMrEp for EP {
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomic_from<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        res: &mut MemoryRegionSlice<T>,
+        res_desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        let slice_res = unsafe {
+            std::slice::from_raw_parts_mut(res.start as *mut T, res.len / std::mem::size_of::<T>())
+        };
+        self.fetch_atomic_impl(
+            slice,
+            desc,
+            slice_res,
+            res_desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomic_from_with_context<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        res: &mut MemoryRegionSlice<T>,
+        res_desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        let slice_res = unsafe {
+            std::slice::from_raw_parts_mut(res.start as *mut T, res.len / std::mem::size_of::<T>())
+        };
+        self.fetch_atomic_impl(
+            slice,
+            desc,
+            slice_res,
+            res_desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomic_from_triggered<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        res: &mut MemoryRegionSlice<T>,
+        res_desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        let slice_res = unsafe {
+            std::slice::from_raw_parts_mut(res.start as *mut T, res.len / std::mem::size_of::<T>())
+        };
+        self.fetch_atomic_impl(
+            slice,
+            desc,
+            slice_res,
+            res_desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomicv_from<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+    ) -> Result<(), crate::error::Error> {
+        self.fetch_atomicv_mr_impl(
+            ioc,
+            desc,
+            resultv,
+            res_desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomicv_from_with_context<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        self.fetch_atomicv_mr_impl(
+            ioc,
+            desc,
+            resultv,
+            res_desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomicv_from_triggered<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        self.fetch_atomicv_mr_impl(
+            ioc,
+            desc,
+            resultv,
+            res_desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+    unsafe fn fetch_atomicmsg_from<T: AsFiType + Copy>(
+        &self,
+        msg: &crate::msg::MsgFetchAtomicMr<T>,
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        options: AtomicFetchMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        self.fetch_atomicmsg_mr_impl(
+            MsgType::ConnectionlessMrMsg(msg),
+            resultv,
+            res_desc,
+            options,
+        )
+    }
+}
+impl<EP: AtomicFetchEpImpl + ConnectedMrLocalEp> ConnectedAtomicFetchMrEp for EP {
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomic<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        res: &mut MemoryRegionSlice<T>,
+        res_desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        let slice_res = unsafe {
+            std::slice::from_raw_parts_mut(res.start as *mut T, res.len / std::mem::size_of::<T>())
+        };
+        self.fetch_atomic_impl(
+            slice, desc, slice_res, res_desc, None, mem_addr, mapped_key, op, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomic_with_context<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        res: &mut MemoryRegionSlice<T>,
+        res_desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        let slice_res = unsafe {
+            std::slice::from_raw_parts_mut(res.start as *mut T, res.len / std::mem::size_of::<T>())
+        };
+        self.fetch_atomic_impl(
+            slice,
+            desc,
+            slice_res,
+            res_desc,
+            None,
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomic_triggered<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        res: &mut MemoryRegionSlice<T>,
+        res_desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        let slice_res = unsafe {
+            std::slice::from_raw_parts_mut(res.start as *mut T, res.len / std::mem::size_of::<T>())
+        };
+        self.fetch_atomic_impl(
+            slice,
+            desc,
+            slice_res,
+            res_desc,
+            None,
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomicv<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+    ) -> Result<(), crate::error::Error> {
+        self.fetch_atomicv_mr_impl(
+            ioc, desc, resultv, res_desc, None, mem_addr, mapped_key, op, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomicv_with_context<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        self.fetch_atomicv_mr_impl(
+            ioc,
+            desc,
+            resultv,
+            res_desc,
+            None,
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fetch_atomicv_triggered<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::FetchAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        self.fetch_atomicv_mr_impl(
+            ioc,
+            desc,
+            resultv,
+            res_desc,
+            None,
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    unsafe fn fetch_atomicmsg<T: AsFiType + Copy>(
+        &self,
+        msg: &crate::msg::MsgFetchAtomicConnectedMr<T>,
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        options: AtomicFetchMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        self.fetch_atomicmsg_mr_impl(MsgType::ConnectedMrMsg(msg), resultv, res_desc, options)
     }
 }
 
@@ -1220,9 +2284,53 @@ pub(crate) trait AtomicCASImpl: AsRawTypedFid<Output = EpRawFid> + AtomicValidEp
     }
 
     #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicv_mr_impl<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        comparetv: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        dest_addr: Option<&crate::MappedAddress>,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: Option<*mut std::ffi::c_void>,
+    ) -> Result<(), crate::error::Error> {
+        let (raw_addr, ctx) = extract_raw_addr_and_ctx(dest_addr, context);
+        let err = unsafe {
+            libfabric_sys::inlined_fi_compare_atomicv(
+                self.as_raw_typed_fid(),
+                ioc.as_ptr().cast(),
+                desc.as_mut_ptr().cast(),
+                ioc.len(),
+                comparetv.as_ptr().cast(),
+                compare_desc.as_mut_ptr().cast(),
+                comparetv.len(),
+                resultv.as_mut_ptr().cast(),
+                res_desc.as_mut_ptr().cast(),
+                resultv.len(),
+                raw_addr,
+                mem_addr,
+                mapped_key.get_key(),
+                T::as_fi_datatype(),
+                op.as_raw(),
+                ctx,
+            )
+        };
+        check_error(err)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     unsafe fn compare_atomicmsg_impl<T: AsFiType>(
         &self,
-        msg: Either<&crate::msg::MsgCompareAtomic<T>, &crate::msg::MsgCompareAtomicConnected<T>>,
+        msg: MsgType<
+            &crate::msg::MsgCompareAtomic<T>,
+            &crate::msg::MsgCompareAtomicConnected<T>,
+            &crate::msg::MsgCompareAtomicMr<T>,
+            &crate::msg::MsgCompareAtomicConnectedMr<T>,
+        >,
         comparev: &[crate::iovec::Ioc<T>],
         compare_desc: &mut [impl DataDescriptor],
         resultv: &mut [crate::iovec::IocMut<T>],
@@ -1230,8 +2338,49 @@ pub(crate) trait AtomicCASImpl: AsRawTypedFid<Output = EpRawFid> + AtomicValidEp
         options: AtomicMsgOptions,
     ) -> Result<(), crate::error::Error> {
         let c_atomic_msg = match msg {
-            Either::Left(msg) => msg.get(),
-            Either::Right(msg) => msg.get(),
+            MsgType::ConnectionlessMsg(msg) => msg.get(),
+            MsgType::ConnectedMsg(msg) => msg.get(),
+            MsgType::ConnectionlessMrMsg(msg) => msg.get(),
+            MsgType::ConnectedMrMsg(msg) => msg.get(),
+        };
+
+        let err: isize = unsafe {
+            libfabric_sys::inlined_fi_compare_atomicmsg(
+                self.as_raw_typed_fid(),
+                c_atomic_msg,
+                comparev.as_ptr().cast(),
+                compare_desc.as_mut_ptr().cast(),
+                comparev.len(),
+                resultv.as_mut_ptr().cast(),
+                res_desc.as_mut_ptr().cast(),
+                resultv.len(),
+                options.as_raw(),
+            )
+        };
+
+        check_error(err)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicmsg_mr_impl<T: AsFiType + Copy>(
+        &self,
+        msg: MsgType<
+            &crate::msg::MsgCompareAtomic<T>,
+            &crate::msg::MsgCompareAtomicConnected<T>,
+            &crate::msg::MsgCompareAtomicMr<T>,
+            &crate::msg::MsgCompareAtomicConnectedMr<T>,
+        >,
+        comparev: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        options: AtomicMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        let c_atomic_msg = match msg {
+            MsgType::ConnectionlessMsg(msg) => msg.get(),
+            MsgType::ConnectedMsg(msg) => msg.get(),
+            MsgType::ConnectionlessMrMsg(msg) => msg.get(),
+            MsgType::ConnectedMrMsg(msg) => msg.get(),
         };
 
         let err: isize = unsafe {
@@ -1459,6 +2608,213 @@ pub trait ConnectedAtomicCASEp {
         options: AtomicMsgOptions,
     ) -> Result<(), crate::error::Error>;
 }
+pub trait AtomicCASMrEp {
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomic_to<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        compare: &MemoryRegionSlice<T>,
+        compare_desc: &mut impl DataDescriptor,
+        result: &mut MemoryRegionSlice<T>,
+        result_desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+    ) -> Result<(), crate::error::Error>;
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomic_to_with_context<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        compare: &MemoryRegionSlice<T>,
+        compare_desc: &mut impl DataDescriptor,
+        result: &mut MemoryRegionSlice<T>,
+        result_desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomic_to_triggered<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        compare: &MemoryRegionSlice<T>,
+        compare_desc: &mut impl DataDescriptor,
+        result: &mut MemoryRegionSlice<T>,
+        result_desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicv_to<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        comparetv: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+    ) -> Result<(), crate::error::Error>;
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicv_to_with_context<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        comparetv: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicv_to_triggered<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        comparetv: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicmsg_to<T: AsFiType + Copy>(
+        &self,
+        msg: &crate::msg::MsgCompareAtomicMr<T>,
+        comparev: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        options: AtomicMsgOptions,
+    ) -> Result<(), crate::error::Error>;
+}
+
+pub trait ConnectedAtomicCASMrEp {
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomic<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        compare: &MemoryRegionSlice<T>,
+        compare_desc: &mut impl DataDescriptor,
+        result: &mut MemoryRegionSlice<T>,
+        result_desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+    ) -> Result<(), crate::error::Error>;
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomic_with_context<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        compare: &MemoryRegionSlice<T>,
+        compare_desc: &mut impl DataDescriptor,
+        result: &mut MemoryRegionSlice<T>,
+        result_desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomic_triggered<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        compare: &MemoryRegionSlice<T>,
+        compare_desc: &mut impl DataDescriptor,
+        result: &mut MemoryRegionSlice<T>,
+        result_desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicv<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        comparetv: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+    ) -> Result<(), crate::error::Error>;
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicv_with_context<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        comparetv: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicv_triggered<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        comparetv: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicmsg<T: AsFiType + Copy>(
+        &self,
+        msg: &crate::msg::MsgCompareAtomicConnectedMr<T>,
+        comparev: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        options: AtomicMsgOptions,
+    ) -> Result<(), crate::error::Error>;
+}
 
 impl<EP: AtomicCASImpl + ConnlessEp> AtomicCASEp for EP {
     #[inline]
@@ -1657,7 +3013,7 @@ impl<EP: AtomicCASImpl + ConnlessEp> AtomicCASEp for EP {
         options: AtomicMsgOptions,
     ) -> Result<(), crate::error::Error> {
         self.compare_atomicmsg_impl(
-            Either::Left(msg),
+            MsgType::ConnectionlessMsg(msg),
             comparev,
             compare_desc,
             resultv,
@@ -1858,7 +3214,505 @@ impl<EP: AtomicCASImpl + ConnectedEp> ConnectedAtomicCASEp for EP {
         options: AtomicMsgOptions,
     ) -> Result<(), crate::error::Error> {
         self.compare_atomicmsg_impl(
-            Either::Right(msg),
+            MsgType::ConnectedMsg(msg),
+            comparev,
+            compare_desc,
+            resultv,
+            res_desc,
+            options,
+        )
+    }
+}
+
+impl<EP: AtomicCASImpl + ConnlessMrLocalEp> AtomicCASMrEp for EP {
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomic_to<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        compare: &MemoryRegionSlice<T>,
+        compare_desc: &mut impl DataDescriptor,
+        result: &mut MemoryRegionSlice<T>,
+        result_desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        let slice_cmp = unsafe {
+            std::slice::from_raw_parts(
+                compare.start as *const T,
+                compare.len / std::mem::size_of::<T>(),
+            )
+        };
+        let slice_res = unsafe {
+            std::slice::from_raw_parts_mut(
+                result.start as *mut T,
+                result.len / std::mem::size_of::<T>(),
+            )
+        };
+        self.compare_atomic_impl(
+            slice,
+            desc,
+            slice_cmp,
+            compare_desc,
+            slice_res,
+            result_desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            None,
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomic_to_with_context<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        compare: &MemoryRegionSlice<T>,
+        compare_desc: &mut impl DataDescriptor,
+        result: &mut MemoryRegionSlice<T>,
+        result_desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        let slice_cmp = unsafe {
+            std::slice::from_raw_parts(
+                compare.start as *const T,
+                compare.len / std::mem::size_of::<T>(),
+            )
+        };
+        let slice_res = unsafe {
+            std::slice::from_raw_parts_mut(
+                result.start as *mut T,
+                result.len / std::mem::size_of::<T>(),
+            )
+        };
+        self.compare_atomic_impl(
+            slice,
+            desc,
+            slice_cmp,
+            compare_desc,
+            slice_res,
+            result_desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomic_to_triggered<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        compare: &MemoryRegionSlice<T>,
+        compare_desc: &mut impl DataDescriptor,
+        result: &mut MemoryRegionSlice<T>,
+        result_desc: &mut impl DataDescriptor,
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        let slice_cmp = unsafe {
+            std::slice::from_raw_parts(
+                compare.start as *const T,
+                compare.len / std::mem::size_of::<T>(),
+            )
+        };
+        let slice_res = unsafe {
+            std::slice::from_raw_parts_mut(
+                result.start as *mut T,
+                result.len / std::mem::size_of::<T>(),
+            )
+        };
+        self.compare_atomic_impl(
+            slice,
+            desc,
+            slice_cmp,
+            compare_desc,
+            slice_res,
+            result_desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicv_to<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        comparetv: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+    ) -> Result<(), crate::error::Error> {
+        self.compare_atomicv_mr_impl(
+            ioc,
+            desc,
+            comparetv,
+            compare_desc,
+            resultv,
+            res_desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            None,
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicv_to_with_context<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        comparetv: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        self.compare_atomicv_mr_impl(
+            ioc,
+            desc,
+            comparetv,
+            compare_desc,
+            resultv,
+            res_desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicv_to_triggered<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        comparetv: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        dest_addr: &crate::MappedAddress,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        self.compare_atomicv_mr_impl(
+            ioc,
+            desc,
+            comparetv,
+            compare_desc,
+            resultv,
+            res_desc,
+            Some(dest_addr),
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicmsg_to<T: AsFiType + Copy>(
+        &self,
+        msg: &crate::msg::MsgCompareAtomicMr<T>,
+        comparev: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        options: AtomicMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        self.compare_atomicmsg_mr_impl(
+            MsgType::ConnectionlessMrMsg(msg),
+            comparev,
+            compare_desc,
+            resultv,
+            res_desc,
+            options,
+        )
+    }
+}
+
+impl<EP: AtomicCASImpl + ConnectedMrLocalEp> ConnectedAtomicCASMrEp for EP {
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomic<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        compare: &MemoryRegionSlice<T>,
+        compare_desc: &mut impl DataDescriptor,
+        result: &mut MemoryRegionSlice<T>,
+        result_desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        let slice_cmp = unsafe {
+            std::slice::from_raw_parts(
+                compare.start as *const T,
+                compare.len / std::mem::size_of::<T>(),
+            )
+        };
+        let slice_res = unsafe {
+            std::slice::from_raw_parts_mut(
+                result.start as *mut T,
+                result.len / std::mem::size_of::<T>(),
+            )
+        };
+        self.compare_atomic_impl(
+            slice,
+            desc,
+            slice_cmp,
+            compare_desc,
+            slice_res,
+            result_desc,
+            None,
+            mem_addr,
+            mapped_key,
+            op,
+            None,
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomic_with_context<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        compare: &MemoryRegionSlice<T>,
+        compare_desc: &mut impl DataDescriptor,
+        result: &mut MemoryRegionSlice<T>,
+        result_desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        let slice_cmp = unsafe {
+            std::slice::from_raw_parts(
+                compare.start as *const T,
+                compare.len / std::mem::size_of::<T>(),
+            )
+        };
+        let slice_res = unsafe {
+            std::slice::from_raw_parts_mut(
+                result.start as *mut T,
+                result.len / std::mem::size_of::<T>(),
+            )
+        };
+        self.compare_atomic_impl(
+            slice,
+            desc,
+            slice_cmp,
+            compare_desc,
+            slice_res,
+            result_desc,
+            None,
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomic_triggered<T: AsFiType + Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        compare: &MemoryRegionSlice<T>,
+        compare_desc: &mut impl DataDescriptor,
+        result: &mut MemoryRegionSlice<T>,
+        result_desc: &mut impl DataDescriptor,
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        let slice_cmp = unsafe {
+            std::slice::from_raw_parts(
+                compare.start as *const T,
+                compare.len / std::mem::size_of::<T>(),
+            )
+        };
+        let slice_res = unsafe {
+            std::slice::from_raw_parts_mut(
+                result.start as *mut T,
+                result.len / std::mem::size_of::<T>(),
+            )
+        };
+        self.compare_atomic_impl(
+            slice,
+            desc,
+            slice_cmp,
+            compare_desc,
+            slice_res,
+            result_desc,
+            None,
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicv<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        comparetv: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+    ) -> Result<(), crate::error::Error> {
+        self.compare_atomicv_mr_impl(
+            ioc,
+            desc,
+            comparetv,
+            compare_desc,
+            resultv,
+            res_desc,
+            None,
+            mem_addr,
+            mapped_key,
+            op,
+            None,
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicv_with_context<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        comparetv: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        self.compare_atomicv_mr_impl(
+            ioc,
+            desc,
+            comparetv,
+            compare_desc,
+            resultv,
+            res_desc,
+            None,
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicv_triggered<T: AsFiType + Copy>(
+        &self,
+        ioc: &[crate::iovec::IocMr<T>],
+        desc: &mut [impl DataDescriptor],
+        comparetv: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        mem_addr: u64,
+        mapped_key: &MappedMemoryRegionKey,
+        op: crate::enums::CompareAtomicOp,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        self.compare_atomicv_mr_impl(
+            ioc,
+            desc,
+            comparetv,
+            compare_desc,
+            resultv,
+            res_desc,
+            None,
+            mem_addr,
+            mapped_key,
+            op,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn compare_atomicmsg<T: AsFiType + Copy>(
+        &self,
+        msg: &crate::msg::MsgCompareAtomicConnectedMr<T>,
+        comparev: &[crate::iovec::IocMr<T>],
+        compare_desc: &mut [impl DataDescriptor],
+        resultv: &mut [crate::iovec::IocMutMr<T>],
+        res_desc: &mut [impl DataDescriptor],
+        options: AtomicMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        self.compare_atomicmsg_mr_impl(
+            MsgType::ConnectedMrMsg(msg),
             comparev,
             compare_desc,
             resultv,

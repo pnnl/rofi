@@ -1,6 +1,8 @@
 use super::message::extract_raw_addr_and_ctx;
 use crate::conn_ep::ConnectedEp;
+use crate::conn_ep::ConnectedMrLocalEp;
 use crate::connless_ep::ConnlessEp;
+use crate::connless_ep::ConnlessMrLocalEp;
 use crate::cq::ReadCq;
 use crate::enums::TaggedRecvMsgOptions;
 use crate::enums::TaggedSendMsgOptions;
@@ -16,9 +18,11 @@ use crate::infocapsoptions::RecvMod;
 use crate::infocapsoptions::SendMod;
 use crate::infocapsoptions::TagCap;
 use crate::mr::DataDescriptor;
+use crate::mr::MemoryRegion;
+use crate::mr::MemoryRegionSlice;
 use crate::trigger::TriggeredContext;
 use crate::utils::check_error;
-use crate::utils::Either;
+use crate::utils::MsgType;
 use crate::xcontext::RxContextBase;
 use crate::xcontext::RxContextImplBase;
 use crate::xcontext::TxContextBase;
@@ -78,14 +82,46 @@ pub(crate) trait TagRecvEpImpl: AsRawTypedFid<Output = EpRawFid> {
         check_error(err)
     }
 
+    fn trecvv_mr_impl(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        src_mapped_addr: Option<&MappedAddress>,
+        tag: u64,
+        ignore: u64,
+        context: Option<*mut std::ffi::c_void>,
+    ) -> Result<(), crate::error::Error> {
+        let (raw_addr, ctx) = extract_raw_addr_and_ctx(src_mapped_addr, context);
+        let err = unsafe {
+            libfabric_sys::inlined_fi_trecvv(
+                self.as_raw_typed_fid(),
+                iov.as_ptr().cast(),
+                desc.as_mut_ptr().cast(),
+                iov.len(),
+                raw_addr,
+                tag,
+                ignore,
+                ctx,
+            )
+        };
+        check_error(err)
+    }
+
     fn trecvmsg_impl(
         &self,
-        msg: Either<&crate::msg::MsgTaggedMut, &crate::msg::MsgTaggedConnectedMut>,
+        msg: MsgType<
+            &crate::msg::MsgTaggedMut,
+            &crate::msg::MsgTaggedConnectedMut,
+            &crate::msg::MsgTaggedMutMr,
+            &crate::msg::MsgTaggedConnectedMutMr,
+        >,
         options: TaggedRecvMsgOptions,
     ) -> Result<(), crate::error::Error> {
         let c_tagged_msg = match msg {
-            Either::Left(msg) => msg.c_msg_tagged,
-            Either::Right(msg) => msg.c_msg_tagged,
+            MsgType::ConnectionlessMsg(msg) => msg.c_msg_tagged,
+            MsgType::ConnectedMsg(msg) => msg.c_msg_tagged,
+            MsgType::ConnectionlessMrMsg(msg) => msg.c_msg_tagged,
+            MsgType::ConnectedMrMsg(msg) => msg.c_msg_tagged,
         };
 
         let err = unsafe {
@@ -205,6 +241,112 @@ pub trait TagRecvEp {
     ) -> Result<(), crate::error::Error>;
 }
 
+pub trait TagRecvMrEp {
+    fn trecv_from<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+        ignore: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn trecv_from_with_context<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+        ignore: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn trecv_from_triggered<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+        ignore: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn trecvv_from(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        src_mapped_addr: &MappedAddress,
+        tag: u64,
+        ignore: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn trecvv_from_with_context(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        src_mapped_addr: &MappedAddress,
+        tag: u64,
+        ignore: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn trecvv_from_triggered(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        src_mapped_addr: &MappedAddress,
+        tag: u64,
+        ignore: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn trecvmsg_from(
+        &self,
+        msg: &crate::msg::MsgTaggedMutMr,
+        options: TaggedRecvMsgOptions,
+    ) -> Result<(), crate::error::Error>;
+    fn trecv_from_any<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        ignore: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn trecv_from_any_with_context<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        ignore: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn trecv_from_any_triggered<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        ignore: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn trecvv_from_any(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        src_tag: u64,
+        ignore: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn trecvv_from_any_with_context(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        src_tag: u64,
+        ignore: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn trecvv_from_any_triggered(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        src_tag: u64,
+        ignore: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+}
+
 pub trait ConnectedTagRecvEp {
     fn trecv<T>(
         &self,
@@ -255,6 +397,60 @@ pub trait ConnectedTagRecvEp {
     fn trecvmsg(
         &self,
         msg: &crate::msg::MsgTaggedConnectedMut,
+        options: TaggedRecvMsgOptions,
+    ) -> Result<(), crate::error::Error>;
+}
+
+pub trait ConnectedTagRecvMrEp {
+    fn trecv<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        ignore: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn trecv_with_context<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        ignore: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn trecv_triggered<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        ignore: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn trecvv(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+        ignore: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn trecvv_with_context(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+        ignore: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn trecvv_triggered(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+        ignore: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn trecvmsg(
+        &self,
+        msg: &crate::msg::MsgTaggedConnectedMutMr,
         options: TaggedRecvMsgOptions,
     ) -> Result<(), crate::error::Error>;
 }
@@ -444,7 +640,214 @@ impl<EP: TagRecvEpImpl + ConnlessEp> TagRecvEp for EP {
         msg: &crate::msg::MsgTaggedMut,
         options: TaggedRecvMsgOptions,
     ) -> Result<(), crate::error::Error> {
-        self.trecvmsg_impl(Either::Left(msg), options)
+        self.trecvmsg_impl(MsgType::ConnectionlessMsg(msg), options)
+    }
+}
+
+impl<EP: TagRecvEpImpl + ConnlessMrLocalEp> TagRecvMrEp for EP {
+    #[inline]
+    fn trecv_from<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+        ignore: u64,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.trecv_impl(slice, desc, Some(mapped_addr), tag, ignore, None)
+    }
+
+    #[inline]
+    fn trecv_from_any<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        ignore: u64,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.trecv_impl(slice, desc, None, tag, ignore, None)
+    }
+
+    #[inline]
+    fn trecv_from_with_context<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+        ignore: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.trecv_impl(
+            slice,
+            desc,
+            Some(mapped_addr),
+            tag,
+            ignore,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    fn trecv_from_any_with_context<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        ignore: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.trecv_impl(slice, desc, None, tag, ignore, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn trecv_from_triggered<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+        ignore: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.trecv_impl(
+            slice,
+            desc,
+            Some(mapped_addr),
+            tag,
+            ignore,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    fn trecv_from_any_triggered<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        ignore: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.trecv_impl(slice, desc, None, tag, ignore, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn trecvv_from(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        src_mapped_addr: &MappedAddress,
+        tag: u64,
+        ignore: u64,
+    ) -> Result<(), crate::error::Error> {
+        self.trecvv_mr_impl(iov, desc, Some(src_mapped_addr), tag, ignore, None)
+    }
+
+    #[inline]
+    fn trecvv_from_any(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+        ignore: u64,
+    ) -> Result<(), crate::error::Error> {
+        self.trecvv_mr_impl(iov, desc, None, tag, ignore, None)
+    }
+
+    #[inline]
+    fn trecvv_from_with_context(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        src_mapped_addr: &MappedAddress,
+        tag: u64,
+        ignore: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        //[TODO]
+        self.trecvv_mr_impl(
+            iov,
+            desc,
+            Some(src_mapped_addr),
+            tag,
+            ignore,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    fn trecvv_from_any_with_context(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+        ignore: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        //[TODO]
+        self.trecvv_mr_impl(iov, desc, None, tag, ignore, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn trecvv_from_triggered(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        src_mapped_addr: &MappedAddress,
+        tag: u64,
+        ignore: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        //[TODO]
+        self.trecvv_mr_impl(
+            iov,
+            desc,
+            Some(src_mapped_addr),
+            tag,
+            ignore,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    fn trecvv_from_any_triggered(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+        ignore: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        //[TODO]
+        self.trecvv_mr_impl(iov, desc, None, tag, ignore, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn trecvmsg_from(
+        &self,
+        msg: &crate::msg::MsgTaggedMutMr,
+        options: TaggedRecvMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        self.trecvmsg_impl(MsgType::ConnectionlessMrMsg(msg), options)
     }
 }
 
@@ -528,7 +931,100 @@ impl<EP: TagRecvEpImpl + ConnectedEp> ConnectedTagRecvEp for EP {
         msg: &crate::msg::MsgTaggedConnectedMut,
         options: TaggedRecvMsgOptions,
     ) -> Result<(), crate::error::Error> {
-        self.trecvmsg_impl(Either::Right(msg), options)
+        self.trecvmsg_impl(MsgType::ConnectedMsg(msg), options)
+    }
+}
+
+impl<EP: TagRecvEpImpl + ConnectedMrLocalEp> ConnectedTagRecvMrEp for EP {
+    #[inline]
+    fn trecv<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        ignore: u64,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.trecv_impl(slice, desc, None, tag, ignore, None)
+    }
+
+    #[inline]
+    fn trecv_with_context<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        ignore: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.trecv_impl(slice, desc, None, tag, ignore, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn trecv_triggered<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        ignore: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.trecv_impl(slice, desc, None, tag, ignore, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn trecvv(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+        ignore: u64,
+    ) -> Result<(), crate::error::Error> {
+        //[TODO]
+        self.trecvv_mr_impl(iov, desc, None, tag, ignore, None)
+    }
+
+    #[inline]
+    fn trecvv_with_context(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+        ignore: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        //[TODO]
+        self.trecvv_mr_impl(iov, desc, None, tag, ignore, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn trecvv_triggered(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+        ignore: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        //[TODO]
+        self.trecvv_mr_impl(iov, desc, None, tag, ignore, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn trecvmsg(
+        &self,
+        msg: &crate::msg::MsgTaggedConnectedMutMr,
+        options: TaggedRecvMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        self.trecvmsg_impl(MsgType::ConnectedMrMsg(msg), options)
     }
 }
 
@@ -588,14 +1084,44 @@ pub(crate) trait TagSendEpImpl: AsRawTypedFid<Output = EpRawFid> {
         check_error(err)
     }
 
+    fn tsendv_mr_impl(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        dest_mapped_addr: Option<&MappedAddress>,
+        tag: u64,
+        context: Option<*mut std::ffi::c_void>,
+    ) -> Result<(), crate::error::Error> {
+        let (raw_addr, ctx) = extract_raw_addr_and_ctx(dest_mapped_addr, context);
+        let err = unsafe {
+            libfabric_sys::inlined_fi_tsendv(
+                self.as_raw_typed_fid(),
+                iov.as_ptr().cast(),
+                desc.as_mut_ptr().cast(),
+                iov.len(),
+                raw_addr,
+                tag,
+                ctx,
+            )
+        };
+        check_error(err)
+    }
+
     fn tsendmsg_impl(
         &self,
-        msg: Either<&crate::msg::MsgTagged, &crate::msg::MsgTaggedConnected>,
+        msg: MsgType<
+            &crate::msg::MsgTagged,
+            &crate::msg::MsgTaggedConnected,
+            &crate::msg::MsgTaggedMr,
+            &crate::msg::MsgTaggedConnectedMr,
+        >,
         options: TaggedSendMsgOptions,
     ) -> Result<(), crate::error::Error> {
         let c_tagged_msg = match msg {
-            Either::Left(msg) => msg.c_msg_tagged,
-            Either::Right(msg) => msg.c_msg_tagged,
+            MsgType::ConnectionlessMsg(msg) => msg.c_msg_tagged,
+            MsgType::ConnectedMsg(msg) => msg.c_msg_tagged,
+            MsgType::ConnectionlessMrMsg(msg) => msg.c_msg_tagged,
+            MsgType::ConnectedMrMsg(msg) => msg.c_msg_tagged,
         };
         let err = unsafe {
             libfabric_sys::inlined_fi_tsendmsg(
@@ -847,6 +1373,181 @@ pub trait ConnectedTagSendEp {
     fn tinjectdata<T>(&self, buf: &[T], data: u64, tag: u64) -> Result<(), crate::error::Error>;
 }
 
+pub trait TagSendMrEp {
+    fn tsend_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn tsend_to_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn tsend_to_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn tsendv_to(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        dest_mapped_addr: &MappedAddress,
+        tag: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn tsendv_to_with_context(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        dest_mapped_addr: &MappedAddress,
+        tag: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn tsendv_to_triggered(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        dest_mapped_addr: &MappedAddress,
+        tag: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn tsendmsg_to(
+        &self,
+        msg: &crate::msg::MsgTaggedMr,
+        options: TaggedSendMsgOptions,
+    ) -> Result<(), crate::error::Error>;
+    fn tsenddata_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn tsenddata_to_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn tsenddata_to_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn tinject_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn tinjectdata_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        data: u64,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+    ) -> Result<(), crate::error::Error>;
+}
+
+pub trait ConnectedTagSendMrEp {
+    fn tsend<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn tsend_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn tsend_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn tsendv(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn tsendv_with_context(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn tsendv_triggered(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn tsendmsg(
+        &self,
+        msg: &crate::msg::MsgTaggedConnectedMr,
+        options: TaggedSendMsgOptions,
+    ) -> Result<(), crate::error::Error>;
+    fn tsenddata<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        tag: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn tsenddata_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        tag: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn tsenddata_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        tag: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn tinject<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        tag: u64,
+    ) -> Result<(), crate::error::Error>;
+    fn tinjectdata<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        data: u64,
+        tag: u64,
+    ) -> Result<(), crate::error::Error>;
+}
+
 impl<EP: TagSendEpImpl + ConnlessEp> TagSendEp for EP {
     #[inline]
     fn tsend_to<T>(
@@ -1012,7 +1713,213 @@ impl<EP: TagSendEpImpl + ConnlessEp> TagSendEp for EP {
         msg: &crate::msg::MsgTagged,
         options: TaggedSendMsgOptions,
     ) -> Result<(), crate::error::Error> {
-        self.tsendmsg_impl(Either::Left(msg), options)
+        self.tsendmsg_impl(MsgType::ConnectionlessMsg(msg), options)
+    }
+}
+
+impl<EP: TagSendEpImpl + ConnlessMrLocalEp> TagSendMrEp for EP {
+    #[inline]
+    fn tsend_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tsend_impl(slice, desc, Some(mapped_addr), tag, None)
+    }
+
+    #[inline]
+    fn tsend_to_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tsend_impl(
+            slice,
+            desc,
+            Some(mapped_addr),
+            tag,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    fn tsend_to_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tsend_impl(
+            slice,
+            desc,
+            Some(mapped_addr),
+            tag,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    fn tsendv_to(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        dest_mapped_addr: &MappedAddress,
+        tag: u64,
+    ) -> Result<(), crate::error::Error> {
+        // [TODO]
+        self.tsendv_mr_impl(iov, desc, Some(dest_mapped_addr), tag, None)
+    }
+
+    #[inline]
+    fn tsendv_to_with_context(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        dest_mapped_addr: &MappedAddress,
+        tag: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        // [TODO]
+        self.tsendv_mr_impl(
+            iov,
+            desc,
+            Some(dest_mapped_addr),
+            tag,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    fn tsendv_to_triggered(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        dest_mapped_addr: &MappedAddress,
+        tag: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        // [TODO]
+        self.tsendv_mr_impl(
+            iov,
+            desc,
+            Some(dest_mapped_addr),
+            tag,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    fn tsenddata_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tsenddata_impl(slice, desc, data, Some(mapped_addr), tag, None)
+    }
+
+    #[inline]
+    fn tsenddata_to_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tsenddata_impl(
+            slice,
+            desc,
+            data,
+            Some(mapped_addr),
+            tag,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    fn tsenddata_to_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tsenddata_impl(
+            slice,
+            desc,
+            data,
+            Some(mapped_addr),
+            tag,
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    fn tinject_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tinject_impl(slice, Some(mapped_addr), tag)
+    }
+
+    #[inline]
+    fn tinjectdata_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        data: u64,
+        mapped_addr: &MappedAddress,
+        tag: u64,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+
+        self.tinjectdata_impl(slice, data, Some(mapped_addr), tag)
+    }
+
+    #[inline]
+    fn tsendmsg_to(
+        &self,
+        msg: &crate::msg::MsgTaggedMr,
+        options: TaggedSendMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        self.tsendmsg_impl(MsgType::ConnectionlessMrMsg(msg), options)
     }
 }
 
@@ -1135,7 +2042,163 @@ impl<EP: TagSendEpImpl + ConnectedEp> ConnectedTagSendEp for EP {
         msg: &crate::msg::MsgTaggedConnected,
         options: TaggedSendMsgOptions,
     ) -> Result<(), crate::error::Error> {
-        self.tsendmsg_impl(Either::Right(msg), options)
+        self.tsendmsg_impl(MsgType::ConnectedMsg(msg), options)
+    }
+}
+
+impl<EP: TagSendEpImpl + ConnectedMrLocalEp> ConnectedTagSendMrEp for EP {
+    #[inline]
+    fn tsend<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tsend_impl(slice, desc, None, tag, None)
+    }
+
+    #[inline]
+    fn tsend_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tsend_impl(slice, desc, None, tag, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn tsend_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        tag: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tsend_impl(slice, desc, None, tag, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn tsendv(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+    ) -> Result<(), crate::error::Error> {
+        // [TODO]
+        self.tsendv_mr_impl(iov, desc, None, tag, None)
+    }
+
+    #[inline]
+    fn tsendv_with_context(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        // [TODO]
+        self.tsendv_mr_impl(iov, desc, None, tag, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn tsendv_triggered(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        tag: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        // [TODO]
+        self.tsendv_mr_impl(iov, desc, None, tag, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn tsenddata<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        tag: u64,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tsenddata_impl(slice, desc, data, None, tag, None)
+    }
+
+    #[inline]
+    fn tsenddata_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        tag: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tsenddata_impl(slice, desc, data, None, tag, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn tsenddata_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        tag: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tsenddata_impl(slice, desc, data, None, tag, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn tinject<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        tag: u64,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tinject_impl(slice, None, tag)
+    }
+
+    #[inline]
+    fn tinjectdata<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        data: u64,
+        tag: u64,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.tinjectdata_impl(slice, data, None, tag)
+    }
+
+    #[inline]
+    fn tsendmsg(
+        &self,
+        msg: &crate::msg::MsgTaggedConnectedMr,
+        options: TaggedSendMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        self.tsendmsg_impl(MsgType::ConnectedMrMsg(msg), options)
     }
 }
 

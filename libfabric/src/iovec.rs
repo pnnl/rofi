@@ -1,10 +1,10 @@
 use std::marker::PhantomData;
 
-use crate::mr::MappedMemoryRegionKey;
+use crate::mr::{MappedMemoryRegionKey, MemoryRegionSlice};
 
 #[repr(C)]
 pub struct IoVec<'a> {
-    c_iovec: libfabric_sys::iovec,
+    pub(crate) c_iovec: libfabric_sys::iovec,
     borrow: PhantomData<&'a ()>,
 }
 
@@ -62,6 +62,55 @@ impl<'a> IoVecMut<'a> {
         let c_iovec = libfabric_sys::iovec {
             iov_base: mem.as_mut_ptr().cast(),
             iov_len: std::mem::size_of_val(mem),
+        };
+
+        Self {
+            c_iovec,
+            borrow: PhantomData,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn get_mut(&mut self) -> &mut libfabric_sys::iovec {
+        &mut self.c_iovec
+    }
+}
+
+pub struct IoVecMr<'a> {
+    pub(crate) c_iovec: libfabric_sys::iovec,
+    borrow: PhantomData<&'a ()>,
+}
+
+impl<'a> IoVecMr<'a> {
+    pub fn from<T: Copy>(mem: &'a MemoryRegionSlice<T>) -> Self {
+        let c_iovec = libfabric_sys::iovec {
+            iov_base: (mem.start as *const T as *mut T).cast(),
+            iov_len: mem.len(),
+        };
+
+        Self {
+            c_iovec,
+            borrow: PhantomData,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn get(&self) -> &libfabric_sys::iovec {
+        &self.c_iovec
+    }
+}
+
+#[repr(C)]
+pub struct IoVecMutMr<'a> {
+    c_iovec: libfabric_sys::iovec,
+    borrow: PhantomData<&'a mut ()>,
+}
+
+impl<'a> IoVecMutMr<'a> {
+    pub fn from<T: Copy>(mem: &'a mut MemoryRegionSlice<T>) -> Self {
+        let c_iovec = libfabric_sys::iovec {
+            iov_base: (mem.start as *mut T).cast(),
+            iov_len: mem.len(),
         };
 
         Self {
@@ -235,6 +284,56 @@ impl RmaIoc {
 
     pub(crate) fn get(&self) -> *const libfabric_sys::fi_rma_ioc {
         &self.c_rma_ioc
+    }
+}
+
+#[repr(C)]
+pub struct IocMr<'a, T: Copy> {
+    c_ioc: libfabric_sys::fi_ioc,
+    borrow: PhantomData<&'a T>,
+}
+
+impl<'a, T: Copy> IocMr<'a, T> {
+    pub fn from(mem: &'a MemoryRegionSlice<T>) -> Self {
+        let c_ioc = libfabric_sys::fi_ioc {
+            addr: (mem.start as *const T as *mut T).cast(),
+            count: mem.len() / std::mem::size_of::<T>(),
+        };
+
+        Self {
+            c_ioc,
+            borrow: PhantomData,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn get(&self) -> &libfabric_sys::fi_ioc {
+        &self.c_ioc
+    }
+}
+
+#[repr(C)]
+pub struct IocMutMr<'a, T> {
+    c_ioc: libfabric_sys::fi_ioc,
+    borrow: PhantomData<&'a mut T>,
+}
+
+impl<'a, T: Copy> IocMutMr<'a, T> {
+    pub fn from(mem: &'a mut MemoryRegionSlice<T>) -> Self {
+        let c_ioc = libfabric_sys::fi_ioc {
+            addr: (mem.start as *mut T).cast(),
+            count: mem.len() / std::mem::size_of::<T>(),
+        };
+
+        Self {
+            c_ioc,
+            borrow: PhantomData,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn get_mut(&mut self) -> &mut libfabric_sys::fi_ioc {
+        &mut self.c_ioc
     }
 }
 

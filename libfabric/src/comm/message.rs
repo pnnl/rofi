@@ -1,6 +1,6 @@
 use crate::{
-    conn_ep::ConnectedEp,
-    connless_ep::ConnlessEp,
+    conn_ep::{ConnectedEp, ConnectedMrLocalEp},
+    connless_ep::{ConnlessEp, ConnlessMrLocalEp},
     cq::ReadCq,
     enums::{RecvMsgOptions, SendMsgOptions},
     ep::{Connected, Connectionless, EndpointBase, EndpointImplBase, EpMrReq},
@@ -9,7 +9,7 @@ use crate::{
     infocapsoptions::{MsgCap, RecvMod, SendMod},
     mr::{DataDescriptor, MemoryRegionSlice},
     trigger::TriggeredContext,
-    utils::{check_error, Either},
+    utils::{check_error, MsgType},
     xcontext::{RxContextBase, RxContextImplBase, TxContextBase, TxContextImplBase},
     Context, MappedAddress, FI_ADDR_UNSPEC,
 };
@@ -84,14 +84,42 @@ pub(crate) trait RecvEpImpl: AsRawTypedFid<Output = EpRawFid> {
         check_error(err)
     }
 
+    fn recvv_mr_impl(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        mapped_addr: Option<&crate::MappedAddress>,
+        context: Option<*mut std::ffi::c_void>,
+    ) -> Result<(), crate::error::Error> {
+        let (raw_addr, ctx) = extract_raw_addr_and_ctx(mapped_addr, context);
+        let err = unsafe {
+            libfabric_sys::inlined_fi_recvv(
+                self.as_raw_typed_fid(),
+                iov.as_ptr().cast(),
+                desc.as_mut_ptr().cast(),
+                iov.len(),
+                raw_addr,
+                ctx,
+            )
+        };
+        check_error(err)
+    }
+
     fn recvmsg_impl(
         &self,
-        msg: Either<&crate::msg::MsgMut, &crate::msg::MsgConnectedMut>,
+        msg: MsgType<
+            &crate::msg::MsgMut,
+            &crate::msg::MsgConnectedMut,
+            &crate::msg::MsgMutMr,
+            &crate::msg::MsgConnectedMutMr,
+        >,
         options: RecvMsgOptions,
     ) -> Result<(), crate::error::Error> {
         let c_msg = match msg {
-            Either::Left(msg) => msg.c_msg,
-            Either::Right(msg) => msg.c_msg,
+            MsgType::ConnectionlessMsg(msg) => msg.c_msg,
+            MsgType::ConnectedMsg(msg) => msg.c_msg,
+            MsgType::ConnectionlessMrMsg(msg) => msg.c_msg,
+            MsgType::ConnectedMrMsg(msg) => msg.c_msg,
         };
 
         let err = unsafe {
@@ -161,28 +189,28 @@ pub trait ConnectedRecvMrEp {
         desc: &mut impl DataDescriptor,
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error>;
-    // fn recvv(
-    //     &self,
-    //     iov: &[crate::iovec::IoVecMut],
-    //     desc: &mut [impl DataDescriptor],
-    // ) -> Result<(), crate::error::Error>;
-    // fn recvv_with_context<T0>(
-    //     &self,
-    //     iov: &[crate::iovec::IoVecMut],
-    //     desc: &mut [impl DataDescriptor],
-    //     context: &mut Context,
-    // ) -> Result<(), crate::error::Error>;
-    // fn recvv_triggered<T0>(
-    //     &self,
-    //     iov: &[crate::iovec::IoVecMut],
-    //     desc: &mut [impl DataDescriptor],
-    //     context: &mut TriggeredContext,
-    // ) -> Result<(), crate::error::Error>;
-    // fn recvmsg(
-    //     &self,
-    //     msg: &crate::msg::MsgConnectedMut,
-    //     options: RecvMsgOptions,
-    // ) -> Result<(), crate::error::Error>;
+    fn recvv(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+    ) -> Result<(), crate::error::Error>;
+    fn recvv_with_context<T0>(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn recvv_triggered<T0>(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn recvmsg(
+        &self,
+        msg: &crate::msg::MsgConnectedMutMr,
+        options: RecvMsgOptions,
+    ) -> Result<(), crate::error::Error>;
 }
 
 impl<EP: RecvEpImpl + ConnectedEp> ConnectedRecvEp for EP {
@@ -244,7 +272,79 @@ impl<EP: RecvEpImpl + ConnectedEp> ConnectedRecvEp for EP {
         msg: &crate::msg::MsgConnectedMut,
         options: RecvMsgOptions,
     ) -> Result<(), crate::error::Error> {
-        self.recvmsg_impl(Either::Right(msg), options)
+        self.recvmsg_impl(MsgType::ConnectedMsg(msg), options)
+    }
+}
+
+impl<EP: RecvEpImpl + ConnectedMrLocalEp> ConnectedRecvMrEp for EP {
+    #[inline]
+    fn recv<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.recv_impl::<T>(slice, desc, None, None)
+    }
+    #[inline]
+    fn recv_with_context<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.recv_impl(slice, desc, None, Some(context.inner_mut()))
+    }
+    #[inline]
+    fn recv_triggered<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.recv_impl(slice, desc, None, Some(context.inner_mut()))
+    }
+    #[inline]
+    fn recvv(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+    ) -> Result<(), crate::error::Error> {
+        self.recvv_mr_impl(iov, desc, None, None)
+    }
+    #[inline]
+    fn recvv_with_context<T0>(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        self.recvv_mr_impl(iov, desc, None, Some(context.inner_mut()))
+    }
+    #[inline]
+    fn recvv_triggered<T0>(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        self.recvv_mr_impl(iov, desc, None, Some(context.inner_mut()))
+    }
+    #[inline]
+    fn recvmsg(
+        &self,
+        msg: &crate::msg::MsgConnectedMutMr,
+        options: RecvMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        self.recvmsg_impl(MsgType::ConnectedMrMsg(msg), options)
     }
 }
 
@@ -326,6 +426,88 @@ pub trait RecvEp {
     fn recvmsg_from(
         &self,
         msg: &crate::msg::MsgMut,
+        options: RecvMsgOptions,
+    ) -> Result<(), crate::error::Error>;
+}
+
+pub trait RecvMrEp {
+    fn recv_from<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &crate::MappedAddress,
+    ) -> Result<(), crate::error::Error>;
+    fn recv_from_with_context<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &crate::MappedAddress,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn recv_from_triggered<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &crate::MappedAddress,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn recvv_from(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        mapped_addr: &crate::MappedAddress,
+    ) -> Result<(), crate::error::Error>;
+    fn recvv_from_with_context<T0>(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        mapped_addr: &crate::MappedAddress,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn recvv_from_triggered<T0>(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        mapped_addr: &crate::MappedAddress,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn recv_from_any<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+    ) -> Result<(), crate::error::Error>;
+    fn recv_from_any_with_context<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn recvv_from_any(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+    ) -> Result<(), crate::error::Error>;
+    fn recvv_from_any_with_context<T0>(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn recv_from_any_triggered<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn recvv_from_any_triggered<T0>(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
+    fn recvmsg_from(
+        &self,
+        msg: &crate::msg::MsgMutMr,
         options: RecvMsgOptions,
     ) -> Result<(), crate::error::Error>;
 }
@@ -459,7 +641,158 @@ impl<EP: RecvEpImpl + ConnlessEp> RecvEp for EP {
         msg: &crate::msg::MsgMut,
         options: RecvMsgOptions,
     ) -> Result<(), crate::error::Error> {
-        self.recvmsg_impl(Either::Left(msg), options)
+        self.recvmsg_impl(MsgType::ConnectionlessMsg(msg), options)
+    }
+}
+
+impl<EP: RecvEpImpl + ConnlessMrLocalEp> RecvMrEp for EP {
+    #[inline]
+    fn recv_from_any<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.recv_impl::<T>(slice, desc, None, None)
+    }
+
+    #[inline]
+    fn recv_from_any_with_context<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.recv_impl(slice, desc, None, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn recv_from<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &crate::MappedAddress,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.recv_impl::<T>(slice, desc, Some(mapped_addr), None)
+    }
+
+    #[inline]
+    fn recv_from_with_context<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &crate::MappedAddress,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.recv_impl(slice, desc, Some(mapped_addr), Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn recv_from_triggered<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &crate::MappedAddress,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.recv_impl(slice, desc, Some(mapped_addr), Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn recvv_from(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        mapped_addr: &crate::MappedAddress,
+    ) -> Result<(), crate::error::Error> {
+        self.recvv_mr_impl(iov, desc, Some(mapped_addr), None)
+    }
+
+    #[inline]
+    fn recvv_from_with_context<T0>(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        mapped_addr: &crate::MappedAddress,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        self.recvv_mr_impl(iov, desc, Some(mapped_addr), Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn recvv_from_triggered<T0>(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        mapped_addr: &crate::MappedAddress,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        self.recvv_mr_impl(iov, desc, Some(mapped_addr), Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn recv_from_any_triggered<T: Copy>(
+        &self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
+        };
+        self.recv_impl(slice, desc, None, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn recvv_from_any(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+    ) -> Result<(), crate::error::Error> {
+        self.recvv_mr_impl(iov, desc, None, None)
+    }
+
+    #[inline]
+    fn recvv_from_any_with_context<T0>(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        self.recvv_mr_impl(iov, desc, None, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn recvv_from_any_triggered<T0>(
+        &self,
+        iov: &[crate::iovec::IoVecMutMr],
+        desc: &mut [impl DataDescriptor],
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        self.recvv_mr_impl(iov, desc, None, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn recvmsg_from(
+        &self,
+        msg: &crate::msg::MsgMutMr,
+        options: RecvMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        self.recvmsg_impl(MsgType::ConnectionlessMrMsg(msg), options)
     }
 }
 
@@ -476,6 +809,27 @@ pub(crate) trait SendEpImpl: AsRawTypedFid<Output = EpRawFid> {
     fn sendv_impl(
         &self,
         iov: &[crate::iovec::IoVec],
+        desc: &mut [impl DataDescriptor],
+        mapped_addr: Option<&crate::MappedAddress>,
+        context: Option<*mut std::ffi::c_void>,
+    ) -> Result<(), crate::error::Error> {
+        let (raw_addr, ctx) = extract_raw_addr_and_ctx(mapped_addr, context);
+        let err = unsafe {
+            libfabric_sys::inlined_fi_sendv(
+                self.as_raw_typed_fid(),
+                iov.as_ptr().cast(),
+                desc.as_mut_ptr().cast(),
+                iov.len(),
+                raw_addr,
+                ctx,
+            )
+        };
+        check_error(err)
+    }
+
+    fn sendv_mr_impl(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
         desc: &mut [impl DataDescriptor],
         mapped_addr: Option<&crate::MappedAddress>,
         context: Option<*mut std::ffi::c_void>,
@@ -517,12 +871,19 @@ pub(crate) trait SendEpImpl: AsRawTypedFid<Output = EpRawFid> {
 
     fn sendmsg_impl(
         &self,
-        msg: Either<&crate::msg::Msg, &crate::msg::MsgConnected>,
+        msg: MsgType<
+            &crate::msg::Msg,
+            &crate::msg::MsgConnected,
+            &crate::msg::MsgMr,
+            &crate::msg::MsgConnectedMr,
+        >,
         options: SendMsgOptions,
     ) -> Result<(), crate::error::Error> {
         let c_msg = match msg {
-            Either::Left(msg) => msg.c_msg,
-            Either::Right(msg) => msg.c_msg,
+            MsgType::ConnectionlessMsg(msg) => msg.c_msg,
+            MsgType::ConnectedMsg(msg) => msg.c_msg,
+            MsgType::ConnectionlessMrMsg(msg) => msg.c_msg,
+            MsgType::ConnectedMrMsg(msg) => msg.c_msg,
         };
 
         let err = unsafe {
@@ -682,26 +1043,26 @@ pub trait SendEp {
 }
 
 pub trait SendMrEp {
-    // fn sendv_to(
-    //     &self,
-    //     iov: &[crate::iovec::IoVec],
-    //     desc: &mut [impl DataDescriptor],
-    //     mapped_addr: &crate::MappedAddress,
-    // ) -> Result<(), crate::error::Error>;
-    // fn sendv_to_with_context(
-    //     &self,
-    //     iov: &[crate::iovec::IoVec],
-    //     desc: &mut [impl DataDescriptor],
-    //     mapped_addr: &crate::MappedAddress,
-    //     context: &mut Context,
-    // ) -> Result<(), crate::error::Error>;
-    // fn sendv_to_triggered(
-    //     &self,
-    //     iov: &[crate::iovec::IoVec],
-    //     desc: &mut [impl DataDescriptor],
-    //     mapped_addr: &crate::MappedAddress,
-    //     context: &mut TriggeredContext,
-    // ) -> Result<(), crate::error::Error>;
+    fn sendv_to(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        mapped_addr: &crate::MappedAddress,
+    ) -> Result<(), crate::error::Error>;
+    fn sendv_to_with_context(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        mapped_addr: &crate::MappedAddress,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn sendv_to_triggered(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        mapped_addr: &crate::MappedAddress,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
     fn send_to<T: Copy>(
         &self,
         buf: &MemoryRegionSlice<T>,
@@ -724,7 +1085,7 @@ pub trait SendMrEp {
     ) -> Result<(), crate::error::Error>;
     fn sendmsg_to(
         &self,
-        msg: &crate::msg::Msg,
+        msg: &crate::msg::MsgMr,
         options: SendMsgOptions,
     ) -> Result<(), crate::error::Error>;
     fn senddata_to<T: Copy>(
@@ -825,23 +1186,23 @@ pub trait ConnectedSendEp {
 }
 
 pub trait ConnectedSendMrEp {
-    // fn sendv(
-    //     &self,
-    //     iov: &[crate::iovec::IoVec],
-    //     desc: &mut [impl DataDescriptor],
-    // ) -> Result<(), crate::error::Error>;
-    // fn sendv_with_context(
-    //     &self,
-    //     iov: &[crate::iovec::IoVec],
-    //     desc: &mut [impl DataDescriptor],
-    //     context: &mut Context,
-    // ) -> Result<(), crate::error::Error>;
-    // fn sendv_triggered(
-    //     &self,
-    //     iov: &[crate::iovec::IoVec],
-    //     desc: &mut [impl DataDescriptor],
-    //     context: &mut TriggeredContext,
-    // ) -> Result<(), crate::error::Error>;
+    fn sendv(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+    ) -> Result<(), crate::error::Error>;
+    fn sendv_with_context(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error>;
+    fn sendv_triggered(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error>;
     fn send<T: Copy>(
         &self,
         buf: &MemoryRegionSlice<T>,
@@ -861,7 +1222,7 @@ pub trait ConnectedSendMrEp {
     ) -> Result<(), crate::error::Error>;
     fn sendmsg(
         &self,
-        msg: &crate::msg::MsgConnected,
+        msg: &crate::msg::MsgConnectedMr,
         options: SendMsgOptions,
     ) -> Result<(), crate::error::Error>;
     fn senddata<T: Copy>(
@@ -965,7 +1326,7 @@ impl<EP: SendEpImpl + ConnlessEp> SendEp for EP {
         msg: &crate::msg::Msg,
         options: SendMsgOptions,
     ) -> Result<(), crate::error::Error> {
-        self.sendmsg_impl(Either::Left(msg), options)
+        self.sendmsg_impl(MsgType::ConnectionlessMsg(msg), options)
     }
 
     #[inline]
@@ -1032,6 +1393,173 @@ impl<EP: SendEpImpl + ConnlessEp> SendEp for EP {
         mapped_addr: &crate::MappedAddress,
     ) -> Result<(), crate::error::Error> {
         self.injectdata_impl(buf, data, Some(mapped_addr))
+    }
+}
+
+impl<EP: SendEpImpl + ConnlessMrLocalEp> SendMrEp for EP {
+    #[inline]
+    fn sendv_to(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        mapped_addr: &crate::MappedAddress,
+    ) -> Result<(), crate::error::Error> {
+        self.sendv_mr_impl(iov, desc, Some(mapped_addr), None)
+    }
+
+    #[inline]
+    fn sendv_to_with_context(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        mapped_addr: &crate::MappedAddress,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        // [TODO]
+        self.sendv_mr_impl(iov, desc, Some(mapped_addr), Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn sendv_to_triggered(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        mapped_addr: &crate::MappedAddress,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        // [TODO]
+        self.sendv_mr_impl(iov, desc, Some(mapped_addr), Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn send_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &crate::MappedAddress,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.send_impl::<T>(slice, desc, Some(mapped_addr), None)
+    }
+
+    #[inline]
+    fn send_to_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &crate::MappedAddress,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.send_impl(slice, desc, Some(mapped_addr), Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn send_to_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        mapped_addr: &crate::MappedAddress,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.send_impl(slice, desc, Some(mapped_addr), Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn sendmsg_to(
+        &self,
+        msg: &crate::msg::MsgMr,
+        options: SendMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        self.sendmsg_impl(MsgType::ConnectionlessMrMsg(msg), options)
+    }
+
+    #[inline]
+    fn senddata_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        mapped_addr: &crate::MappedAddress,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.senddata_impl::<T>(slice, desc, data, Some(mapped_addr), None)
+    }
+
+    #[inline]
+    fn senddata_to_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        mapped_addr: &crate::MappedAddress,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.senddata_impl(
+            slice,
+            desc,
+            data,
+            Some(mapped_addr),
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    fn senddata_to_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        mapped_addr: &crate::MappedAddress,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.senddata_impl(
+            slice,
+            desc,
+            data,
+            Some(mapped_addr),
+            Some(context.inner_mut()),
+        )
+    }
+
+    #[inline]
+    fn inject_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        mapped_addr: &crate::MappedAddress,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.inject_impl(slice, Some(mapped_addr))
+    }
+
+    #[inline]
+    fn injectdata_to<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        data: u64,
+        mapped_addr: &crate::MappedAddress,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.injectdata_impl(slice, data, Some(mapped_addr))
     }
 }
 
@@ -1102,7 +1630,7 @@ impl<EP: SendEpImpl + ConnectedEp> ConnectedSendEp for EP {
         msg: &crate::msg::MsgConnected,
         options: SendMsgOptions,
     ) -> Result<(), crate::error::Error> {
-        self.sendmsg_impl(Either::Right(msg), options)
+        self.sendmsg_impl(MsgType::ConnectedMsg(msg), options)
     }
 
     #[inline]
@@ -1145,6 +1673,147 @@ impl<EP: SendEpImpl + ConnectedEp> ConnectedSendEp for EP {
     #[inline]
     fn injectdata<T>(&self, buf: &[T], data: u64) -> Result<(), crate::error::Error> {
         self.injectdata_impl(buf, data, None)
+    }
+}
+
+impl<EP: SendEpImpl + ConnectedMrLocalEp> ConnectedSendMrEp for EP {
+    #[inline]
+    fn sendv(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+    ) -> Result<(), crate::error::Error> {
+        self.sendv_mr_impl(iov, desc, None, None)
+    }
+
+    #[inline]
+    fn sendv_with_context(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        // [TODO]
+        self.sendv_mr_impl(iov, desc, None, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn sendv_triggered(
+        &self,
+        iov: &[crate::iovec::IoVecMr],
+        desc: &mut [impl DataDescriptor],
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        // [TODO]
+        self.sendv_mr_impl(iov, desc, None, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn send<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.send_impl::<T>(slice, desc, None, None)
+    }
+
+    #[inline]
+    fn send_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.send_impl(slice, desc, None, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn send_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.send_impl(slice, desc, None, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn sendmsg(
+        &self,
+        msg: &crate::msg::MsgConnectedMr,
+        options: SendMsgOptions,
+    ) -> Result<(), crate::error::Error> {
+        self.sendmsg_impl(MsgType::ConnectedMrMsg(msg), options)
+    }
+
+    #[inline]
+    fn senddata<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.senddata_impl::<T>(slice, desc, data, None, None)
+    }
+
+    #[inline]
+    fn senddata_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        context: &mut Context,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.senddata_impl(slice, desc, data, None, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn senddata_triggered<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut impl DataDescriptor,
+        data: u64,
+        context: &mut TriggeredContext,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.senddata_impl(slice, desc, data, None, Some(context.inner_mut()))
+    }
+
+    #[inline]
+    fn inject<T: Copy>(&self, buf: &MemoryRegionSlice<T>) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.inject_impl(slice, None)
+    }
+
+    #[inline]
+    fn injectdata<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        data: u64,
+    ) -> Result<(), crate::error::Error> {
+        let slice = unsafe {
+            std::slice::from_raw_parts(buf.start as *const T, buf.len / std::mem::size_of::<T>())
+        };
+        self.injectdata_impl(slice, data, None)
     }
 }
 

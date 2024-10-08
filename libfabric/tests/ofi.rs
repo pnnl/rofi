@@ -4,15 +4,25 @@ use libfabric::{
     av::AddressVectorBuilder,
     comm::{
         atomic::{
-            AtomicCASEp, AtomicFetchEp, AtomicWriteEp, ConnectedAtomicCASEp,
-            ConnectedAtomicFetchEp, ConnectedAtomicWriteEp,
+            AtomicCASEp, AtomicCASMrEp, AtomicFetchEp, AtomicFetchMrEp, AtomicWriteEp,
+            AtomicWriteMrEp, ConnectedAtomicCASEp, ConnectedAtomicCASMrEp, ConnectedAtomicFetchEp,
+            ConnectedAtomicFetchMrEp, ConnectedAtomicWriteEp, ConnectedAtomicWriteMrEp,
         },
-        message::{ConnectedRecvEp, ConnectedSendEp, RecvEp, SendEp},
-        rma::{ConnectedReadEp, ConnectedWriteEp, ReadEp, WriteEp},
-        tagged::{ConnectedTagRecvEp, ConnectedTagSendEp, TagRecvEp, TagSendEp},
+        message::{
+            ConnectedRecvEp, ConnectedRecvMrEp, ConnectedSendEp, ConnectedSendMrEp, RecvEp,
+            RecvMrEp, SendEp, SendMrEp,
+        },
+        rma::{
+            ConnectedReadEp, ConnectedReadMrEp, ConnectedWriteEp, ConnectedWriteMrEp, ReadEp,
+            ReadMrEp, WriteEp, WriteMrLocalEp,
+        },
+        tagged::{
+            ConnectedTagRecvEp, ConnectedTagRecvMrEp, ConnectedTagSendEp, ConnectedTagSendMrEp,
+            TagRecvEp, TagRecvMrEp, TagSendEp, TagSendMrEp,
+        },
     },
-    conn_ep::ConnectedEndpoint,
-    connless_ep::ConnectionlessEndpoint,
+    conn_ep::{ConnectedEndpoint, ConnectedMrLocalEndpoint},
+    connless_ep::{ConnectionlessEndpoint, ConnectionlessMrLocalEndpoint},
     cq::{Completion, CompletionQueue, CompletionQueueBuilder, ReadCq, WaitCq},
     domain::{Domain, DomainBuilder},
     enums::{
@@ -27,16 +37,20 @@ use libfabric::{
     infocapsoptions::{
         AtomicDefaultCap, Caps, CollCap, InfoCaps, MsgDefaultCap, RmaDefaultCap, TagDefaultCap,
     },
-    iovec::{IoVec, IoVecMut, Ioc, IocMut, RmaIoVec, RmaIoc},
+    iovec::{IoVec, IoVecMr, IoVecMut, IoVecMutMr, Ioc, IocMr, IocMut, IocMutMr, RmaIoVec, RmaIoc},
     mr::{
         default_desc, DisabledMemoryRegion, MappedMemoryRegionKey, MemoryRegion,
-        MemoryRegionBuilder, MemoryRegionDesc, MemoryRegionKey,
+        MemoryRegionBuilder, MemoryRegionDesc, MemoryRegionKey, MemoryRegionSlice,
     },
     msg::{
-        Msg, MsgAtomic, MsgAtomicConnected, MsgCompareAtomic, MsgCompareAtomicConnected,
-        MsgConnected, MsgConnectedMut, MsgFetchAtomic, MsgFetchAtomicConnected, MsgMut, MsgRma,
-        MsgRmaConnected, MsgRmaConnectedMut, MsgRmaMut, MsgTagged, MsgTaggedConnected,
-        MsgTaggedConnectedMut, MsgTaggedMut,
+        Msg, MsgAtomic, MsgAtomicConnected, MsgAtomicConnectedMr, MsgAtomicMr, MsgCompareAtomic,
+        MsgCompareAtomicConnected, MsgCompareAtomicConnectedMr, MsgCompareAtomicMr, MsgConnected,
+        MsgConnectedMr, MsgConnectedMut, MsgConnectedMutMr, MsgFetchAtomic,
+        MsgFetchAtomicConnected, MsgFetchAtomicConnectedMr, MsgFetchAtomicMr, MsgMr, MsgMut,
+        MsgMutMr, MsgRma, MsgRmaConnected, MsgRmaConnectedMr, MsgRmaConnectedMut,
+        MsgRmaConnectedMutMr, MsgRmaMr, MsgRmaMut, MsgRmaMutMr, MsgTagged, MsgTaggedConnected,
+        MsgTaggedConnectedMr, MsgTaggedConnectedMut, MsgTaggedConnectedMutMr, MsgTaggedMr,
+        MsgTaggedMut, MsgTaggedMutMr,
     },
     Context, CqCaps, EqCaps, MappedAddress,
 };
@@ -49,9 +63,11 @@ pub enum CqType {
     Shared(CompletionQueue<SpinCq>),
 }
 
-pub enum Either<L, R> {
-    Left(L),
-    Right(R),
+pub enum MsgType<L, R, LL, RR> {
+    ConnectionlessMsg(L),
+    ConnectedMsg(R),
+    ConnectionlessMrMsg(LL),
+    ConnectedMrMsg(RR),
 }
 
 impl CqType {
@@ -77,7 +93,9 @@ impl CqType {
 
 pub enum MyEndpoint<I> {
     Connected(ConnectedEndpoint<I>),
+    ConnectedMrLocal(ConnectedMrLocalEndpoint<I>),
     Connectionless(ConnectionlessEndpoint<I>),
+    ConnectionlessMrLocal(ConnectionlessMrLocalEndpoint<I>),
 }
 
 pub struct Ofi<I> {
@@ -102,7 +120,8 @@ impl<I> Drop for Ofi<I> {
         match self.info_entry.ep_attr().type_() {
             EndpointType::Msg | EndpointType::SockStream => match &self.ep {
                 MyEndpoint::Connected(ep) => ep.shutdown().unwrap(),
-                MyEndpoint::Connectionless(_) => todo!(),
+                MyEndpoint::ConnectedMrLocal(ep) => ep.shutdown().unwrap(),
+                MyEndpoint::Connectionless(_) | MyEndpoint::ConnectionlessMrLocal(_) => todo!(),
             },
             EndpointType::Unspec
             | EndpointType::Dgram
@@ -232,30 +251,55 @@ impl<I: MsgDefaultCap + Caps + 'static> Ofi<I> {
                 }
 
                 let ep = match ep.enable().unwrap() {
-                    libfabric::conn_ep::UnconnectedEndpointB::PlainData(ep) => ep,
-                    libfabric::conn_ep::UnconnectedEndpointB::MrLocalData(_) => {
-                        todo!("Handle connected Mr")
-                    }
-                };
-
-                if !server {
-                    ep.connect(info_entry.dest_addr().unwrap()).unwrap();
-                } else {
-                    ep.accept().unwrap();
-                }
-
-                let ep = match eq.sread(-1) {
-                    Ok(event) => match event {
-                        libfabric::eq::Event::Connected(event) => ep.connect_complete(event),
-                        _ => panic!("Unexpected Event type"),
-                    },
-                    Err(err) => {
-                        if matches!(err.kind, ErrorKind::ErrorAvailable) {
-                            let err = eq.readerr().unwrap();
-                            panic!("Error in EQ: {}", eq.strerror(&err))
+                    libfabric::conn_ep::UnconnectedEndpointB::PlainData(ep) => {
+                        if !server {
+                            ep.connect(info_entry.dest_addr().unwrap()).unwrap();
                         } else {
-                            panic!("Error in EQ: {:?}", err)
+                            ep.accept().unwrap();
                         }
+
+                        let ep = match eq.sread(-1) {
+                            Ok(event) => match event {
+                                libfabric::eq::Event::Connected(event) => {
+                                    ep.connect_complete(event)
+                                }
+                                _ => panic!("Unexpected Event type"),
+                            },
+                            Err(err) => {
+                                if matches!(err.kind, ErrorKind::ErrorAvailable) {
+                                    let err = eq.readerr().unwrap();
+                                    panic!("Error in EQ: {}", eq.strerror(&err))
+                                } else {
+                                    panic!("Error in EQ: {:?}", err)
+                                }
+                            }
+                        };
+                        MyEndpoint::Connected(ep)
+                    }
+                    libfabric::conn_ep::UnconnectedEndpointB::MrLocalData(ep) => {
+                        if !server {
+                            ep.connect(info_entry.dest_addr().unwrap()).unwrap();
+                        } else {
+                            ep.accept().unwrap();
+                        }
+
+                        let ep = match eq.sread(-1) {
+                            Ok(event) => match event {
+                                libfabric::eq::Event::Connected(event) => {
+                                    ep.connect_complete(event)
+                                }
+                                _ => panic!("Unexpected Event type"),
+                            },
+                            Err(err) => {
+                                if matches!(err.kind, ErrorKind::ErrorAvailable) {
+                                    let err = eq.readerr().unwrap();
+                                    panic!("Error in EQ: {}", eq.strerror(&err))
+                                } else {
+                                    panic!("Error in EQ: {:?}", err)
+                                }
+                            }
+                        };
+                        MyEndpoint::ConnectedMrLocal(ep)
                     }
                 };
 
@@ -272,7 +316,15 @@ impl<I: MsgDefaultCap + Caps + 'static> Ofi<I> {
                     let mr = match mr {
                         libfabric::mr::MaybeDisabledMemoryRegion::Enabled(mr) => mr,
                         libfabric::mr::MaybeDisabledMemoryRegion::Disabled(mr) => {
-                            mr.bind_ep(&ep).unwrap();
+                            match ep {
+                                MyEndpoint::Connected(ref ep) => mr.bind_ep(&ep).unwrap(),
+                                MyEndpoint::ConnectedMrLocal(ref ep) => mr.bind_ep(&ep).unwrap(),
+                                MyEndpoint::Connectionless(ref ep) => mr.bind_ep(&ep).unwrap(),
+                                MyEndpoint::ConnectionlessMrLocal(ref ep) => {
+                                    mr.bind_ep(&ep).unwrap()
+                                }
+                            }
+
                             mr.enable().unwrap()
                         }
                     };
@@ -282,7 +334,7 @@ impl<I: MsgDefaultCap + Caps + 'static> Ofi<I> {
                     (None, None)
                 };
 
-                (info_entry, MyEndpoint::Connected(ep), None)
+                (info_entry, ep, None)
             }
             _ => {
                 domain = DomainBuilder::new(&fabric, &info_entry).build().unwrap();
@@ -315,9 +367,11 @@ impl<I: MsgDefaultCap + Caps + 'static> Ofi<I> {
                 .unwrap();
                 ep.bind_av(&av).unwrap();
                 let ep = match ep.enable().unwrap() {
-                    libfabric::connless_ep::ConnectionlessEndpointB::PlainData(ep) => ep,
-                    libfabric::connless_ep::ConnectionlessEndpointB::MrLocalData(_) => {
-                        todo!("Handle it")
+                    libfabric::connless_ep::ConnectionlessEndpointB::PlainData(ep) => {
+                        MyEndpoint::Connectionless(ep)
+                    }
+                    libfabric::connless_ep::ConnectionlessEndpointB::MrLocalData(ep) => {
+                        MyEndpoint::ConnectionlessMrLocal(ep)
                     }
                 };
                 (mr, key) = if info_entry.domain_attr().mr_mode().is_local()
@@ -333,7 +387,14 @@ impl<I: MsgDefaultCap + Caps + 'static> Ofi<I> {
                     let mr = match mr {
                         libfabric::mr::MaybeDisabledMemoryRegion::Enabled(mr) => mr,
                         libfabric::mr::MaybeDisabledMemoryRegion::Disabled(mr) => {
-                            mr.bind_ep(&ep).unwrap();
+                            match ep {
+                                MyEndpoint::Connected(ref ep) => mr.bind_ep(&ep).unwrap(),
+                                MyEndpoint::ConnectedMrLocal(ref ep) => mr.bind_ep(&ep).unwrap(),
+                                MyEndpoint::Connectionless(ref ep) => mr.bind_ep(&ep).unwrap(),
+                                MyEndpoint::ConnectionlessMrLocal(ref ep) => {
+                                    mr.bind_ep(&ep).unwrap()
+                                }
+                            }
                             mr.enable().unwrap()
                         }
                     };
@@ -343,6 +404,12 @@ impl<I: MsgDefaultCap + Caps + 'static> Ofi<I> {
                     (None, None)
                 };
 
+                let epname = match ep {
+                    MyEndpoint::Connected(ref ep) => ep.getname().unwrap(),
+                    MyEndpoint::ConnectedMrLocal(ref ep) => ep.getname().unwrap(),
+                    MyEndpoint::Connectionless(ref ep) => ep.getname().unwrap(),
+                    MyEndpoint::ConnectionlessMrLocal(ref ep) => ep.getname().unwrap(),
+                };
                 let mapped_address = if let Some(dest_addr) = info_entry.dest_addr() {
                     let mapped_address = av
                         .insert(std::slice::from_ref(dest_addr).into(), AVOptions::new())
@@ -350,36 +417,72 @@ impl<I: MsgDefaultCap + Caps + 'static> Ofi<I> {
                         .pop()
                         .unwrap()
                         .unwrap();
-                    let epname = ep.getname().unwrap();
+
                     let epname_bytes = epname.as_bytes();
                     let addrlen = epname_bytes.len();
                     reg_mem[..addrlen].copy_from_slice(epname_bytes);
 
-                    post!(
-                        send_to,
-                        ft_progress,
-                        cq_type.tx_cq(),
-                        ep,
-                        &reg_mem[..addrlen],
-                        &mut default_desc(),
-                        &mapped_address
-                    );
+                    match ep {
+                        MyEndpoint::ConnectionlessMrLocal(ref ep) => {
+                            let mr_slice = mr.as_ref().unwrap().slice(0);
+
+                            post!(
+                                send_to,
+                                ft_progress,
+                                cq_type.tx_cq(),
+                                ep,
+                                &mr_slice.slice(..addrlen),
+                                &mut default_desc(),
+                                &mapped_address
+                            );
+                        }
+                        MyEndpoint::Connectionless(ref ep) => {
+                            post!(
+                                send_to,
+                                ft_progress,
+                                cq_type.tx_cq(),
+                                ep,
+                                &reg_mem[..addrlen],
+                                &mut default_desc(),
+                                &mapped_address
+                            );
+                        }
+                        _ => panic!("Connectionless only"),
+                    }
+
                     cq_type.tx_cq().sread(1, -1).unwrap();
 
+                    match ep {
+                        MyEndpoint::Connectionless(ref ep) => {
+                            post!(
+                                recv_from_any,
+                                ft_progress,
+                                cq_type.rx_cq(),
+                                ep,
+                                std::slice::from_mut(&mut reg_mem[0]),
+                                &mut default_desc()
+                            );
+                        }
+                        MyEndpoint::ConnectionlessMrLocal(ref ep) => {
+                            let mr_slice = mr.as_ref().unwrap().slice(0);
+
+                            post!(
+                                recv_from_any,
+                                ft_progress,
+                                cq_type.rx_cq(),
+                                ep,
+                                &mut mr_slice.slice(0..1),
+                                &mut default_desc()
+                            );
+                        }
+                        _ => panic!("Connectionless only"),
+                    }
                     // ep.recv(std::slice::from_mut(&mut ack), &mut default_desc()).unwrap();
-                    post!(
-                        recv_from_any,
-                        ft_progress,
-                        cq_type.rx_cq(),
-                        ep,
-                        std::slice::from_mut(&mut reg_mem[0]),
-                        &mut default_desc()
-                    );
+
                     cq_type.rx_cq().sread(1, -1).unwrap();
 
                     mapped_address
                 } else {
-                    let epname = ep.getname().unwrap();
                     let addrlen = epname.as_bytes().len();
 
                     let mut mr_desc = if let Some(ref mr) = mr {
@@ -387,15 +490,31 @@ impl<I: MsgDefaultCap + Caps + 'static> Ofi<I> {
                     } else {
                         default_desc()
                     };
+                    match ep {
+                        MyEndpoint::Connectionless(ref ep) => {
+                            post!(
+                                recv_from_any,
+                                ft_progress,
+                                cq_type.rx_cq(),
+                                ep,
+                                &mut reg_mem[..addrlen],
+                                &mut mr_desc
+                            );
+                        }
+                        MyEndpoint::ConnectionlessMrLocal(ref ep) => {
+                            let mr_slice = mr.as_ref().unwrap().slice(0);
+                            post!(
+                                recv_from_any,
+                                ft_progress,
+                                cq_type.rx_cq(),
+                                ep,
+                                &mut mr_slice.slice(..addrlen),
+                                &mut mr_desc
+                            );
+                        }
+                        _ => panic!("Connectionless only"),
+                    }
 
-                    post!(
-                        recv_from_any,
-                        ft_progress,
-                        cq_type.rx_cq(),
-                        ep,
-                        &mut reg_mem[..addrlen],
-                        &mut mr_desc
-                    );
                     cq_type.rx_cq().sread(1, -1).unwrap();
                     // ep.recv(&mut reg_mem, &mut mr_desc).unwrap();
                     let remote_address = unsafe { Address::from_bytes(&reg_mem) };
@@ -408,24 +527,39 @@ impl<I: MsgDefaultCap + Caps + 'static> Ofi<I> {
                         .pop()
                         .unwrap()
                         .unwrap();
-                    post!(
-                        send_to,
-                        ft_progress,
-                        cq_type.tx_cq(),
-                        ep,
-                        &std::slice::from_ref(&reg_mem[0]),
-                        &mut mr_desc,
-                        &mapped_address
-                    );
+                    match ep {
+                        MyEndpoint::Connectionless(ref ep) => {
+                            post!(
+                                send_to,
+                                ft_progress,
+                                cq_type.tx_cq(),
+                                ep,
+                                &std::slice::from_ref(&reg_mem[0]),
+                                &mut mr_desc,
+                                &mapped_address
+                            );
+                        }
+                        MyEndpoint::ConnectionlessMrLocal(ref ep) => {
+                            let mr_slice = mr.as_ref().unwrap().slice(0);
+
+                            post!(
+                                send_to,
+                                ft_progress,
+                                cq_type.tx_cq(),
+                                ep,
+                                &mr_slice.slice(0..1),
+                                &mut mr_desc,
+                                &mapped_address
+                            );
+                        }
+                        _ => panic!("Connectionless only"),
+                    }
+
                     cq_type.tx_cq().sread(1, -1).unwrap();
 
                     mapped_address
                 };
-                (
-                    info_entry,
-                    MyEndpoint::Connectionless(ep),
-                    Some(mapped_address),
-                )
+                (info_entry, ep, Some(mapped_address))
             }
         };
         if server {
@@ -496,6 +630,73 @@ impl<I: TagDefaultCap> Ofi<I> {
                         }
                     }
                 }
+                _ => panic!("Only handles plain data"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn tsend_mr<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut MemoryRegionDesc,
+        tag: u64,
+        data: Option<u64>,
+    ) {
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => {
+                    if buf.len() <= self.info_entry.tx_attr().inject_size() {
+                        if data.is_some() {
+                            ep.tinjectdata_to(
+                                buf,
+                                data.unwrap(),
+                                self.mapped_addr.as_ref().unwrap(),
+                                tag,
+                            )
+                        } else {
+                            ep.tinject_to(&buf, self.mapped_addr.as_ref().unwrap(), tag)
+                        }
+                    } else {
+                        if data.is_some() {
+                            ep.tsenddata_to(
+                                buf,
+                                desc,
+                                data.unwrap(),
+                                self.mapped_addr.as_ref().unwrap(),
+                                tag,
+                            )
+                        } else {
+                            ep.tsend_to(&buf, desc, self.mapped_addr.as_ref().unwrap(), tag)
+                        }
+                    }
+                }
+                MyEndpoint::ConnectedMrLocal(ep) => {
+                    if buf.len() <= self.info_entry.tx_attr().inject_size() {
+                        if data.is_some() {
+                            ep.tinjectdata(buf, data.unwrap(), tag)
+                        } else {
+                            ep.tinject(buf, tag)
+                        }
+                    } else {
+                        if data.is_some() {
+                            ep.tsenddata(buf, desc, data.unwrap(), tag)
+                        } else {
+                            ep.tsend(&buf, desc, tag)
+                        }
+                    }
+                }
+                _ => panic!("Only handles mr data"),
             };
             match err {
                 Ok(_) => break,
@@ -518,6 +719,30 @@ impl<I: TagDefaultCap> Ofi<I> {
                     ep.tsendv_to(iov, desc, self.mapped_addr.as_ref().unwrap(), tag)
                 }
                 MyEndpoint::Connected(ep) => ep.tsendv(iov, desc, tag),
+                _ => panic!("Only handles plain data"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn tsendv_mr(&mut self, iov: &[IoVecMr], desc: &mut [MemoryRegionDesc], tag: u64) {
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => {
+                    ep.tsendv_to(iov, desc, self.mapped_addr.as_ref().unwrap(), tag)
+                }
+                MyEndpoint::ConnectedMrLocal(ep) => ep.tsendv(iov, desc, tag),
+                _ => panic!("Only handles plain data"),
             };
             match err {
                 Ok(_) => break,
@@ -540,6 +765,30 @@ impl<I: TagDefaultCap> Ofi<I> {
                     ep.trecvv_from(iov, desc, self.mapped_addr.as_ref().unwrap(), tag, 0)
                 }
                 MyEndpoint::Connected(ep) => ep.trecvv(iov, desc, 0, tag),
+                _ => panic!("Plain data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn trecvv_mr(&mut self, iov: &[IoVecMutMr], desc: &mut [MemoryRegionDesc], tag: u64) {
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => {
+                    ep.trecvv_from(iov, desc, self.mapped_addr.as_ref().unwrap(), tag, 0)
+                }
+                MyEndpoint::ConnectedMrLocal(ep) => ep.trecvv(iov, desc, 0, tag),
+                _ => panic!("Mr data only"),
             };
             match err {
                 Ok(_) => break,
@@ -562,6 +811,7 @@ impl<I: TagDefaultCap> Ofi<I> {
                     ep.trecv_from(buf, desc, self.mapped_addr.as_ref().unwrap(), tag, 0)
                 }
                 MyEndpoint::Connected(ep) => ep.trecv(buf, desc, tag, 0),
+                _ => panic!("Plain data only"),
             };
             match err {
                 Ok(_) => break,
@@ -577,16 +827,67 @@ impl<I: TagDefaultCap> Ofi<I> {
         }
     }
 
-    pub fn tsendmsg(&mut self, msg: &Either<MsgTagged, MsgTaggedConnected>) {
+    pub fn trecv_mr<T: Copy>(
+        &mut self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut MemoryRegionDesc,
+        tag: u64,
+    ) {
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => {
+                    ep.trecv_from(buf, desc, self.mapped_addr.as_ref().unwrap(), tag, 0)
+                }
+                MyEndpoint::ConnectedMrLocal(ep) => ep.trecv(buf, desc, tag, 0),
+                _ => panic!("Mr data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn tsendmsg(
+        &mut self,
+        msg: &MsgType<MsgTagged, MsgTaggedConnected, MsgTaggedMr, MsgTaggedConnectedMr>,
+    ) {
         loop {
             let err = match &self.ep {
                 MyEndpoint::Connectionless(ep) => match msg {
-                    Either::Left(msg) => ep.tsendmsg_to(msg, TferOptions::new().remote_cq_data()),
-                    Either::Right(_) => panic!("Wrong message type used"),
+                    MsgType::ConnectionlessMsg(msg) => {
+                        ep.tsendmsg_to(msg, TferOptions::new().remote_cq_data())
+                    }
+                    MsgType::ConnectedMsg(_) => panic!("Wrong message type used"),
+                    _ => panic!("Plain data only"),
                 },
                 MyEndpoint::Connected(ep) => match msg {
-                    Either::Left(_) => panic!("Wrong message type used"),
-                    Either::Right(msg) => ep.tsendmsg(msg, TferOptions::new().remote_cq_data()),
+                    MsgType::ConnectionlessMsg(_) => panic!("Wrong message type used"),
+                    MsgType::ConnectedMsg(msg) => {
+                        ep.tsendmsg(msg, TferOptions::new().remote_cq_data())
+                    }
+                    _ => panic!("Plain data only"),
+                },
+                MyEndpoint::ConnectionlessMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(msg) => {
+                        ep.tsendmsg_to(msg, TferOptions::new().remote_cq_data())
+                    }
+                    MsgType::ConnectedMrMsg(_) => panic!("Wrong message type used"),
+                    _ => panic!("Mr data only"),
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(_) => panic!("Wrong message type used"),
+                    MsgType::ConnectedMrMsg(msg) => {
+                        ep.tsendmsg(msg, TferOptions::new().remote_cq_data())
+                    }
+                    _ => panic!("Mr data only"),
                 },
             };
 
@@ -604,16 +905,31 @@ impl<I: TagDefaultCap> Ofi<I> {
         }
     }
 
-    pub fn trecvmsg(&mut self, msg: &Either<MsgTaggedMut, MsgTaggedConnectedMut>) {
+    pub fn trecvmsg(
+        &mut self,
+        msg: &MsgType<MsgTaggedMut, MsgTaggedConnectedMut, MsgTaggedMutMr, MsgTaggedConnectedMutMr>,
+    ) {
         loop {
             let err = match &self.ep {
                 MyEndpoint::Connectionless(ep) => match msg {
-                    Either::Left(msg) => ep.trecvmsg_from(msg, TferOptions::new()),
-                    Either::Right(_) => panic!("Wrong message type"),
+                    MsgType::ConnectionlessMsg(msg) => ep.trecvmsg_from(msg, TferOptions::new()),
+                    MsgType::ConnectedMsg(_) => panic!("Wrong message type"),
+                    _ => panic!("Only plain data"),
                 },
                 MyEndpoint::Connected(ep) => match msg {
-                    Either::Left(_) => panic!("Wrong message type"),
-                    Either::Right(msg) => ep.trecvmsg(msg, TferOptions::new()),
+                    MsgType::ConnectionlessMsg(_) => panic!("Wrong message type"),
+                    MsgType::ConnectedMsg(msg) => ep.trecvmsg(msg, TferOptions::new()),
+                    _ => panic!("Plain data only"),
+                },
+                MyEndpoint::ConnectionlessMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(msg) => ep.trecvmsg_from(msg, TferOptions::new()),
+                    MsgType::ConnectedMrMsg(_) => panic!("Wrong message type"),
+                    _ => panic!("Only plain data"),
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(_) => panic!("Wrong message type"),
+                    MsgType::ConnectedMrMsg(msg) => ep.trecvmsg(msg, TferOptions::new()),
+                    _ => panic!("Plain data only"),
                 },
             };
 
@@ -671,6 +987,65 @@ impl<I: MsgDefaultCap + 'static> Ofi<I> {
                         }
                     }
                 }
+                _ => panic!("Plain data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+    pub fn send_mr<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut MemoryRegionDesc,
+        data: Option<u64>,
+    ) {
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => {
+                    if buf.len() <= self.info_entry.tx_attr().inject_size() {
+                        if data.is_some() {
+                            ep.injectdata_to(buf, data.unwrap(), self.mapped_addr.as_ref().unwrap())
+                        } else {
+                            ep.inject_to(&buf, self.mapped_addr.as_ref().unwrap())
+                        }
+                    } else {
+                        if data.is_some() {
+                            ep.senddata_to(
+                                &buf,
+                                desc,
+                                data.unwrap(),
+                                self.mapped_addr.as_ref().unwrap(),
+                            )
+                        } else {
+                            ep.send_to(&buf, desc, self.mapped_addr.as_ref().unwrap())
+                        }
+                    }
+                }
+                MyEndpoint::ConnectedMrLocal(ep) => {
+                    if buf.len() <= self.info_entry.tx_attr().inject_size() {
+                        if data.is_some() {
+                            ep.injectdata(&buf, data.unwrap())
+                        } else {
+                            ep.inject(&buf)
+                        }
+                    } else {
+                        if data.is_some() {
+                            ep.senddata(&buf, desc, data.unwrap())
+                        } else {
+                            ep.send(&buf, desc)
+                        }
+                    }
+                }
+                _ => panic!("Mr data only"),
             };
             match err {
                 Ok(_) => break,
@@ -736,6 +1111,73 @@ impl<I: MsgDefaultCap + 'static> Ofi<I> {
                         }
                     }
                 }
+                _ => panic!("Plain data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn send_mr_with_context<T: Copy>(
+        &self,
+        buf: &MemoryRegionSlice<T>,
+        desc: &mut MemoryRegionDesc,
+        data: Option<u64>,
+        context: &mut Context,
+    ) {
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => {
+                    if buf.len() <= self.info_entry.tx_attr().inject_size() {
+                        if data.is_some() {
+                            ep.injectdata_to(buf, data.unwrap(), self.mapped_addr.as_ref().unwrap())
+                        } else {
+                            ep.inject_to(&buf, self.mapped_addr.as_ref().unwrap())
+                        }
+                    } else {
+                        if data.is_some() {
+                            ep.senddata_to_with_context(
+                                &buf,
+                                desc,
+                                data.unwrap(),
+                                self.mapped_addr.as_ref().unwrap(),
+                                context,
+                            )
+                        } else {
+                            ep.send_to_with_context(
+                                &buf,
+                                desc,
+                                self.mapped_addr.as_ref().unwrap(),
+                                context,
+                            )
+                        }
+                    }
+                }
+                MyEndpoint::ConnectedMrLocal(ep) => {
+                    if buf.len() <= self.info_entry.tx_attr().inject_size() {
+                        if data.is_some() {
+                            ep.injectdata(&buf, data.unwrap())
+                        } else {
+                            ep.inject(&buf)
+                        }
+                    } else {
+                        if data.is_some() {
+                            ep.senddata_with_context(&buf, desc, data.unwrap(), context)
+                        } else {
+                            ep.send_with_context(&buf, desc, context)
+                        }
+                    }
+                }
+                _ => panic!("Plain data only"),
             };
             match err {
                 Ok(_) => break,
@@ -758,6 +1200,30 @@ impl<I: MsgDefaultCap + 'static> Ofi<I> {
                     ep.sendv_to(iov, desc, self.mapped_addr.as_ref().unwrap())
                 }
                 MyEndpoint::Connected(ep) => ep.sendv(iov, desc),
+                _ => panic!("Only handles plain data"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn sendv_mr(&mut self, iov: &[IoVecMr], desc: &mut [MemoryRegionDesc]) {
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectedMrLocal(ep) => ep.sendv(iov, desc),
+                MyEndpoint::ConnectionlessMrLocal(ep) => {
+                    ep.sendv_to(iov, desc, self.mapped_addr.as_ref().unwrap())
+                }
+                _ => panic!("Does not handle plain data"),
             };
             match err {
                 Ok(_) => break,
@@ -780,6 +1246,30 @@ impl<I: MsgDefaultCap + 'static> Ofi<I> {
                     ep.recvv_from(iov, desc, self.mapped_addr.as_ref().unwrap())
                 }
                 MyEndpoint::Connected(ep) => ep.recvv(iov, desc),
+                _ => panic!("Only handles plain data"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn recvv_mr(&mut self, iov: &[IoVecMutMr], desc: &mut [MemoryRegionDesc]) {
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => {
+                    ep.recvv_from(iov, desc, self.mapped_addr.as_ref().unwrap())
+                }
+                MyEndpoint::ConnectedMrLocal(ep) => ep.recvv(iov, desc),
+                _ => panic!("Only mr data"),
             };
             match err {
                 Ok(_) => break,
@@ -802,6 +1292,7 @@ impl<I: MsgDefaultCap + 'static> Ofi<I> {
                     ep.recv_from(buf, desc, self.mapped_addr.as_ref().unwrap())
                 }
                 MyEndpoint::Connected(ep) => ep.recv(buf, desc),
+                _ => panic!("Plain data only"),
             };
             match err {
                 Ok(_) => break,
@@ -817,16 +1308,63 @@ impl<I: MsgDefaultCap + 'static> Ofi<I> {
         }
     }
 
-    pub fn sendmsg(&mut self, msg: &Either<Msg, MsgConnected>) {
+    pub fn recv_mr<T: Copy>(
+        &mut self,
+        buf: &mut MemoryRegionSlice<T>,
+        desc: &mut MemoryRegionDesc,
+    ) {
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => {
+                    ep.recv_from(buf, desc, self.mapped_addr.as_ref().unwrap())
+                }
+                MyEndpoint::ConnectedMrLocal(ep) => ep.recv(buf, desc),
+                _ => panic!("MR data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn sendmsg(&mut self, msg: &MsgType<Msg, MsgConnected, MsgMr, MsgConnectedMr>) {
         loop {
             let err = match &self.ep {
                 MyEndpoint::Connectionless(ep) => match msg {
-                    Either::Left(msg) => ep.sendmsg_to(msg, TferOptions::new().remote_cq_data()),
-                    Either::Right(_) => panic!("Wrong msg type"),
+                    MsgType::ConnectionlessMsg(msg) => {
+                        ep.sendmsg_to(msg, TferOptions::new().remote_cq_data())
+                    }
+                    MsgType::ConnectedMsg(_) => panic!("Wrong msg type"),
+                    _ => panic!("Plain data only"),
                 },
                 MyEndpoint::Connected(ep) => match msg {
-                    Either::Left(_) => panic!("Wrong msg type"),
-                    Either::Right(msg) => ep.sendmsg(msg, TferOptions::new().remote_cq_data()),
+                    MsgType::ConnectionlessMsg(_) => panic!("Wrong msg type"),
+                    MsgType::ConnectedMsg(msg) => {
+                        ep.sendmsg(msg, TferOptions::new().remote_cq_data())
+                    }
+                    _ => panic!("Plain data only"),
+                },
+                MyEndpoint::ConnectionlessMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(msg) => {
+                        ep.sendmsg_to(msg, TferOptions::new().remote_cq_data())
+                    }
+                    MsgType::ConnectedMrMsg(_) => panic!("Wrong msg type"),
+                    _ => panic!("Mr data only"),
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(_) => panic!("Wrong msg type"),
+                    MsgType::ConnectedMrMsg(msg) => {
+                        ep.sendmsg(msg, TferOptions::new().remote_cq_data())
+                    }
+                    _ => panic!("Mr data only"),
                 },
             };
 
@@ -844,16 +1382,28 @@ impl<I: MsgDefaultCap + 'static> Ofi<I> {
         }
     }
 
-    pub fn recvmsg(&mut self, msg: &Either<MsgMut, MsgConnectedMut>) {
+    pub fn recvmsg(&mut self, msg: &MsgType<MsgMut, MsgConnectedMut, MsgMutMr, MsgConnectedMutMr>) {
         loop {
             let err = match &self.ep {
                 MyEndpoint::Connectionless(ep) => match msg {
-                    Either::Left(msg) => ep.recvmsg_from(msg, TferOptions::new()),
-                    Either::Right(_) => panic!("Wrong message type"),
+                    MsgType::ConnectionlessMsg(msg) => ep.recvmsg_from(msg, TferOptions::new()),
+                    MsgType::ConnectedMsg(_) => panic!("Wrong message type"),
+                    _ => panic!("Plain data only"),
                 },
                 MyEndpoint::Connected(ep) => match msg {
-                    Either::Left(_) => panic!("Wrong message type"),
-                    Either::Right(msg) => ep.recvmsg(msg, TferOptions::new()),
+                    MsgType::ConnectionlessMsg(_) => panic!("Wrong message type"),
+                    MsgType::ConnectedMsg(msg) => ep.recvmsg(msg, TferOptions::new()),
+                    _ => panic!("Plain data only"),
+                },
+                MyEndpoint::ConnectionlessMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(msg) => ep.recvmsg_from(msg, TferOptions::new()),
+                    MsgType::ConnectedMrMsg(_) => panic!("Wrong message type"),
+                    _ => panic!("Mr data only"),
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(_) => panic!("Wrong message type"),
+                    MsgType::ConnectedMrMsg(msg) => ep.recvmsg(msg, TferOptions::new()),
+                    _ => panic!("Mr data only"),
                 },
             };
 
@@ -910,16 +1460,72 @@ impl<I: MsgDefaultCap + 'static> Ofi<I> {
         };
 
         let mut desc = mr.description();
-        self.send(
-            &reg_mem[..key_bytes.len() + 2 * std::mem::size_of::<usize>()],
-            &mut desc,
-            None,
-        );
-        self.recv(
-            &mut reg_mem[key_bytes.len() + 2 * std::mem::size_of::<usize>()
-                ..2 * key_bytes.len() + 4 * std::mem::size_of::<usize>()],
-            &mut desc,
-        );
+        match self.ep {
+            MyEndpoint::Connected(_) => {
+                self.send(
+                    &reg_mem[..key_bytes.len() + 2 * std::mem::size_of::<usize>()],
+                    &mut desc,
+                    None,
+                );
+                self.recv(
+                    &mut reg_mem[key_bytes.len() + 2 * std::mem::size_of::<usize>()
+                        ..2 * key_bytes.len() + 4 * std::mem::size_of::<usize>()],
+                    &mut desc,
+                );
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                self.send_mr(
+                    &mr.slice(0)
+                        .slice(..key_bytes.len() + 2 * std::mem::size_of::<usize>()),
+                    &mut desc,
+                    None,
+                );
+                self.recv_mr(
+                    &mut mr.slice(0).slice(
+                        key_bytes.len() + 2 * std::mem::size_of::<usize>()
+                            ..2 * key_bytes.len() + 4 * std::mem::size_of::<usize>(),
+                    ),
+                    &mut desc,
+                );
+            }
+            MyEndpoint::Connectionless(_) => {
+                self.send(
+                    &reg_mem[..key_bytes.len() + 2 * std::mem::size_of::<usize>()],
+                    &mut desc,
+                    None,
+                );
+                self.recv(
+                    &mut reg_mem[key_bytes.len() + 2 * std::mem::size_of::<usize>()
+                        ..2 * key_bytes.len() + 4 * std::mem::size_of::<usize>()],
+                    &mut desc,
+                );
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                self.send_mr(
+                    &mr.slice(0)
+                        .slice(..key_bytes.len() + 2 * std::mem::size_of::<usize>()),
+                    &mut desc,
+                    None,
+                );
+                self.recv_mr(
+                    &mut mr.slice(0).slice(
+                        key_bytes.len() + 2 * std::mem::size_of::<usize>()
+                            ..2 * key_bytes.len() + 4 * std::mem::size_of::<usize>(),
+                    ),
+                    &mut desc,
+                );
+            }
+        }
+        // self.send(
+        //     &reg_mem[..key_bytes.len() + 2 * std::mem::size_of::<usize>()],
+        //     &mut desc,
+        //     None,
+        // );
+        // self.recv(
+        //     &mut reg_mem[key_bytes.len() + 2 * std::mem::size_of::<usize>()
+        //         ..2 * key_bytes.len() + 4 * std::mem::size_of::<usize>()],
+        //     &mut desc,
+        // );
 
         self.cq_type.rx_cq().sread(1, -1).unwrap();
         let remote_key = unsafe {
@@ -1053,6 +1659,123 @@ impl<I: MsgDefaultCap + RmaDefaultCap> Ofi<I> {
                         }
                     }
                 }
+                _ => panic!("Plain data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn write_mr<T: Copy>(
+        &mut self,
+        buf: &MemoryRegionSlice<T>,
+        dest_addr: u64,
+        desc: &mut MemoryRegionDesc,
+        data: Option<u64>,
+    ) {
+        let (start, _end) = self.remote_mem_addr.unwrap();
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => {
+                    if buf.len() <= self.info_entry.tx_attr().inject_size() {
+                        if data.is_some() {
+                            unsafe {
+                                ep.inject_writedata_to(
+                                    buf,
+                                    data.unwrap(),
+                                    self.mapped_addr.as_ref().unwrap(),
+                                    start + dest_addr,
+                                    self.remote_key.as_ref().unwrap(),
+                                )
+                            }
+                        } else {
+                            unsafe {
+                                ep.inject_write_to(
+                                    buf,
+                                    self.mapped_addr.as_ref().unwrap(),
+                                    start + dest_addr,
+                                    self.remote_key.as_ref().unwrap(),
+                                )
+                            }
+                        }
+                    } else {
+                        if data.is_some() {
+                            unsafe {
+                                ep.writedata_to(
+                                    buf,
+                                    desc,
+                                    data.unwrap(),
+                                    self.mapped_addr.as_ref().unwrap(),
+                                    start + dest_addr,
+                                    self.remote_key.as_ref().unwrap(),
+                                )
+                            }
+                        } else {
+                            unsafe {
+                                ep.write_to(
+                                    buf,
+                                    desc,
+                                    self.mapped_addr.as_ref().unwrap(),
+                                    start + dest_addr,
+                                    self.remote_key.as_ref().unwrap(),
+                                )
+                            }
+                        }
+                    }
+                }
+                MyEndpoint::ConnectedMrLocal(ep) => {
+                    if buf.len() <= self.info_entry.tx_attr().inject_size() {
+                        if data.is_some() {
+                            unsafe {
+                                ep.inject_writedata(
+                                    buf,
+                                    data.unwrap(),
+                                    start + dest_addr,
+                                    self.remote_key.as_ref().unwrap(),
+                                )
+                            }
+                        } else {
+                            unsafe {
+                                ep.inject_write(
+                                    buf,
+                                    start + dest_addr,
+                                    self.remote_key.as_ref().unwrap(),
+                                )
+                            }
+                        }
+                    } else {
+                        if data.is_some() {
+                            unsafe {
+                                ep.writedata(
+                                    buf,
+                                    desc,
+                                    data.unwrap(),
+                                    start + dest_addr,
+                                    self.remote_key.as_ref().unwrap(),
+                                )
+                            }
+                        } else {
+                            unsafe {
+                                ep.write(
+                                    buf,
+                                    desc,
+                                    start + dest_addr,
+                                    self.remote_key.as_ref().unwrap(),
+                                )
+                            }
+                        }
+                    }
+                }
+                _ => panic!("Mr data only"),
             };
             match err {
                 Ok(_) => break,
@@ -1090,6 +1813,50 @@ impl<I: MsgDefaultCap + RmaDefaultCap> Ofi<I> {
                         self.remote_key.as_ref().unwrap(),
                     )
                 },
+                _ => panic!("Plain data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn read_mr<T: Copy>(
+        &mut self,
+        buf: &mut MemoryRegionSlice<T>,
+        dest_addr: u64,
+        desc: &mut MemoryRegionDesc,
+    ) {
+        let (start, _end) = self.remote_mem_addr.unwrap();
+
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => unsafe {
+                    ep.read_from(
+                        buf,
+                        desc,
+                        self.mapped_addr.as_ref().unwrap(),
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                    )
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => unsafe {
+                    ep.read(
+                        buf,
+                        desc,
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                    )
+                },
+                _ => panic!("Mr data only"),
             };
             match err {
                 Ok(_) => break,
@@ -1126,6 +1893,44 @@ impl<I: MsgDefaultCap + RmaDefaultCap> Ofi<I> {
                         self.remote_key.as_ref().unwrap(),
                     )
                 },
+                _ => panic!("Plain data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn writev_mr(&mut self, iov: &[IoVecMr], dest_addr: u64, desc: &mut [MemoryRegionDesc]) {
+        let (start, _end) = self.remote_mem_addr.unwrap();
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => unsafe {
+                    ep.writev_to(
+                        iov,
+                        desc,
+                        self.mapped_addr.as_ref().unwrap(),
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                    )
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => unsafe {
+                    ep.writev(
+                        iov,
+                        desc,
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                    )
+                },
+                _ => panic!("Mr data only"),
             };
             match err {
                 Ok(_) => break,
@@ -1162,6 +1967,44 @@ impl<I: MsgDefaultCap + RmaDefaultCap> Ofi<I> {
                         self.remote_key.as_ref().unwrap(),
                     )
                 },
+                _ => panic!("Plain data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn readv_mr(&mut self, iov: &[IoVecMutMr], dest_addr: u64, desc: &mut [MemoryRegionDesc]) {
+        let (start, _end) = self.remote_mem_addr.unwrap();
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => unsafe {
+                    ep.readv_from(
+                        iov,
+                        desc,
+                        self.mapped_addr.as_ref().unwrap(),
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                    )
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => unsafe {
+                    ep.readv(
+                        iov,
+                        desc,
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                    )
+                },
+                _ => panic!("Mr data only"),
             };
             match err {
                 Ok(_) => break,
@@ -1179,16 +2022,39 @@ impl<I: MsgDefaultCap + RmaDefaultCap> Ofi<I> {
 
     // [TODO] Enabling .remote_cq_data causes the buffer not being written correctly
     // on the remote side.
-    pub fn writemsg(&mut self, msg: &Either<MsgRma, MsgRmaConnected>) {
+    pub fn writemsg(
+        &mut self,
+        msg: &MsgType<MsgRma, MsgRmaConnected, MsgRmaMr, MsgRmaConnectedMr>,
+    ) {
         loop {
             let err = match &self.ep {
                 MyEndpoint::Connectionless(ep) => match msg {
-                    Either::Left(msg) => unsafe { ep.writemsg_to(msg, WriteMsgOptions::new()) },
-                    Either::Right(_) => panic!("Wrong message type"),
+                    MsgType::ConnectionlessMsg(msg) => unsafe {
+                        ep.writemsg_to(msg, WriteMsgOptions::new())
+                    },
+                    MsgType::ConnectedMsg(_) => panic!("Wrong message type"),
+                    _ => panic!("Plain data only"),
                 },
                 MyEndpoint::Connected(ep) => match msg {
-                    Either::Left(_) => panic!("Wrong message type"),
-                    Either::Right(msg) => unsafe { ep.writemsg(msg, WriteMsgOptions::new()) },
+                    MsgType::ConnectionlessMsg(_) => panic!("Wrong message type"),
+                    MsgType::ConnectedMsg(msg) => unsafe {
+                        ep.writemsg(msg, WriteMsgOptions::new())
+                    },
+                    _ => panic!("Plain data only"),
+                },
+                MyEndpoint::ConnectionlessMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(msg) => unsafe {
+                        ep.writemsg_to(msg, WriteMsgOptions::new())
+                    },
+                    MsgType::ConnectedMrMsg(_) => panic!("Wrong message type"),
+                    _ => panic!("Mr data only"),
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(_) => panic!("Wrong message type"),
+                    MsgType::ConnectedMrMsg(msg) => unsafe {
+                        ep.writemsg(msg, WriteMsgOptions::new())
+                    },
+                    _ => panic!("Mr data only"),
                 },
             };
             match err {
@@ -1205,16 +2071,37 @@ impl<I: MsgDefaultCap + RmaDefaultCap> Ofi<I> {
         }
     }
 
-    pub fn readmsg(&mut self, msg: &Either<MsgRmaMut, MsgRmaConnectedMut>) {
+    pub fn readmsg(
+        &mut self,
+        msg: &MsgType<MsgRmaMut, MsgRmaConnectedMut, MsgRmaMutMr, MsgRmaConnectedMutMr>,
+    ) {
         loop {
             let err = match &self.ep {
                 MyEndpoint::Connectionless(ep) => match msg {
-                    Either::Left(msg) => unsafe { ep.readmsg_from(msg, ReadMsgOptions::new()) },
-                    Either::Right(_) => todo!(),
+                    MsgType::ConnectionlessMsg(msg) => unsafe {
+                        ep.readmsg_from(msg, ReadMsgOptions::new())
+                    },
+                    MsgType::ConnectedMsg(_) => todo!(),
+                    _ => panic!("Plain data only"),
                 },
                 MyEndpoint::Connected(ep) => match msg {
-                    Either::Left(_) => panic!("Wrong message type"),
-                    Either::Right(msg) => unsafe { ep.readmsg(msg, ReadMsgOptions::new()) },
+                    MsgType::ConnectionlessMsg(_) => panic!("Wrong message type"),
+                    MsgType::ConnectedMsg(msg) => unsafe { ep.readmsg(msg, ReadMsgOptions::new()) },
+                    _ => panic!("Plain data only"),
+                },
+                MyEndpoint::ConnectionlessMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(msg) => unsafe {
+                        ep.readmsg_from(msg, ReadMsgOptions::new())
+                    },
+                    MsgType::ConnectedMrMsg(_) => todo!(),
+                    _ => panic!("Plain data only"),
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(_) => panic!("Wrong message type"),
+                    MsgType::ConnectedMrMsg(msg) => unsafe {
+                        ep.readmsg(msg, ReadMsgOptions::new())
+                    },
+                    _ => panic!("Plain data only"),
                 },
             };
             match err {
@@ -1289,6 +2176,79 @@ impl<I: AtomicDefaultCap> Ofi<I> {
                         }
                     }
                 }
+                _ => panic!("Plain data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn atomic_mr<T: libfabric::AsFiType + Copy>(
+        &mut self,
+        buf: &MemoryRegionSlice<T>,
+        dest_addr: u64,
+        desc: &mut MemoryRegionDesc,
+        op: AtomicOp,
+    ) {
+        let (start, _end) = self.remote_mem_addr.unwrap();
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => {
+                    if buf.len() <= self.info_entry.tx_attr().inject_size() {
+                        unsafe {
+                            ep.inject_atomic_to(
+                                buf,
+                                self.mapped_addr.as_ref().unwrap(),
+                                start + dest_addr,
+                                self.remote_key.as_ref().unwrap(),
+                                op,
+                            )
+                        }
+                    } else {
+                        unsafe {
+                            ep.atomic_to(
+                                buf,
+                                desc,
+                                self.mapped_addr.as_ref().unwrap(),
+                                start + dest_addr,
+                                self.remote_key.as_ref().unwrap(),
+                                op,
+                            )
+                        }
+                    }
+                }
+                MyEndpoint::ConnectedMrLocal(ep) => {
+                    if buf.len() <= self.info_entry.tx_attr().inject_size() {
+                        unsafe {
+                            ep.inject_atomic(
+                                buf,
+                                start + dest_addr,
+                                self.remote_key.as_ref().unwrap(),
+                                op,
+                            )
+                        }
+                    } else {
+                        unsafe {
+                            ep.atomic(
+                                buf,
+                                desc,
+                                start + dest_addr,
+                                self.remote_key.as_ref().unwrap(),
+                                op,
+                            )
+                        }
+                    }
+                }
+                _ => panic!("Mr data only"),
             };
             match err {
                 Ok(_) => break,
@@ -1333,6 +2293,7 @@ impl<I: AtomicDefaultCap> Ofi<I> {
                         op,
                     )
                 },
+                _ => panic!("Plain data only"),
             };
             match err {
                 Ok(_) => break,
@@ -1348,20 +2309,77 @@ impl<I: AtomicDefaultCap> Ofi<I> {
         }
     }
 
-    pub fn atomicmsg<T: libfabric::AsFiType>(
+    pub fn atomicv_mr<T: libfabric::AsFiType + Copy>(
         &mut self,
-        msg: &Either<MsgAtomic<T>, MsgAtomicConnected<T>>,
+        ioc: &[libfabric::iovec::IocMr<T>],
+        dest_addr: u64,
+        desc: &mut [MemoryRegionDesc],
+        op: AtomicOp,
+    ) {
+        let (start, _end) = self.remote_mem_addr.unwrap();
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => unsafe {
+                    ep.atomicv_to(
+                        ioc,
+                        desc,
+                        self.mapped_addr.as_ref().unwrap(),
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                        op,
+                    )
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => unsafe {
+                    ep.atomicv(
+                        ioc,
+                        desc,
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                        op,
+                    )
+                },
+                _ => panic!("Mr data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn atomicmsg<T: libfabric::AsFiType + std::marker::Copy>(
+        &mut self,
+        msg: &MsgType<MsgAtomic<T>, MsgAtomicConnected<T>, MsgAtomicMr<T>, MsgAtomicConnectedMr<T>>,
     ) {
         let opts = AtomicMsgOptions::new();
         loop {
             let err = match &self.ep {
                 MyEndpoint::Connectionless(ep) => match msg {
-                    Either::Left(msg) => unsafe { ep.atomicmsg_to(msg, opts) },
-                    Either::Right(_) => todo!(),
+                    MsgType::ConnectionlessMsg(msg) => unsafe { ep.atomicmsg_to(msg, opts) },
+                    MsgType::ConnectedMsg(_) => todo!(),
+                    _ => panic!("Plain data only"),
                 },
                 MyEndpoint::Connected(ep) => match msg {
-                    Either::Left(_) => todo!(),
-                    Either::Right(msg) => unsafe { ep.atomicmsg(msg, opts) },
+                    MsgType::ConnectionlessMsg(_) => todo!(),
+                    MsgType::ConnectedMsg(msg) => unsafe { ep.atomicmsg(msg, opts) },
+                    _ => panic!("Plain data only"),
+                },
+                MyEndpoint::ConnectionlessMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(msg) => unsafe { ep.atomicmsg_to(msg, opts) },
+                    MsgType::ConnectedMsg(_) => todo!(),
+                    _ => panic!("Mr data only"),
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(_) => todo!(),
+                    MsgType::ConnectedMrMsg(msg) => unsafe { ep.atomicmsg(msg, opts) },
+                    _ => panic!("Mr data only"),
                 },
             };
             match err {
@@ -1413,6 +2431,58 @@ impl<I: AtomicDefaultCap> Ofi<I> {
                         op,
                     )
                 },
+                _ => panic!("Plain data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn fetch_atomic_mr<T: libfabric::AsFiType + Copy>(
+        &mut self,
+        buf: &MemoryRegionSlice<T>,
+        res: &mut MemoryRegionSlice<T>,
+        dest_addr: u64,
+        desc: &mut MemoryRegionDesc,
+        res_desc: &mut MemoryRegionDesc,
+        op: FetchAtomicOp,
+    ) {
+        let (start, _end) = self.remote_mem_addr.unwrap();
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => unsafe {
+                    ep.fetch_atomic_from(
+                        buf,
+                        desc,
+                        res,
+                        res_desc,
+                        self.mapped_addr.as_ref().unwrap(),
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                        op,
+                    )
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => unsafe {
+                    ep.fetch_atomic(
+                        buf,
+                        desc,
+                        res,
+                        res_desc,
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                        op,
+                    )
+                },
+                _ => panic!("Plain data only"),
             };
             match err {
                 Ok(_) => break,
@@ -1463,6 +2533,58 @@ impl<I: AtomicDefaultCap> Ofi<I> {
                         op,
                     )
                 },
+                _ => panic!("Plain data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn fetch_atomicv_mr<T: libfabric::AsFiType + Copy>(
+        &mut self,
+        ioc: &[libfabric::iovec::IocMr<T>],
+        res_ioc: &mut [libfabric::iovec::IocMutMr<T>],
+        dest_addr: u64,
+        desc: &mut [MemoryRegionDesc],
+        res_desc: &mut [MemoryRegionDesc],
+        op: FetchAtomicOp,
+    ) {
+        let (start, _end) = self.remote_mem_addr.unwrap();
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => unsafe {
+                    ep.fetch_atomicv_from(
+                        ioc,
+                        desc,
+                        res_ioc,
+                        res_desc,
+                        self.mapped_addr.as_ref().unwrap(),
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                        op,
+                    )
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => unsafe {
+                    ep.fetch_atomicv(
+                        ioc,
+                        desc,
+                        res_ioc,
+                        res_desc,
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                        op,
+                    )
+                },
+                _ => panic!("Mr data only"),
             };
             match err {
                 Ok(_) => break,
@@ -1480,7 +2602,12 @@ impl<I: AtomicDefaultCap> Ofi<I> {
 
     pub fn fetch_atomicmsg<T: libfabric::AsFiType>(
         &mut self,
-        msg: &Either<MsgFetchAtomic<T>, MsgFetchAtomicConnected<T>>,
+        msg: &MsgType<
+            MsgFetchAtomic<T>,
+            MsgFetchAtomicConnected<T>,
+            MsgFetchAtomicMr<T>,
+            MsgFetchAtomicConnectedMr<T>,
+        >,
         res_ioc: &mut [libfabric::iovec::IocMut<T>],
         res_desc: &mut [MemoryRegionDesc],
     ) {
@@ -1488,17 +2615,20 @@ impl<I: AtomicDefaultCap> Ofi<I> {
         loop {
             let err = match &self.ep {
                 MyEndpoint::Connectionless(ep) => match msg {
-                    Either::Left(msg) => unsafe {
+                    MsgType::ConnectionlessMsg(msg) => unsafe {
                         ep.fetch_atomicmsg_from(msg, res_ioc, res_desc, opts)
                     },
-                    Either::Right(_) => todo!(),
+                    MsgType::ConnectedMsg(_) => todo!(),
+                    _ => panic!("Plain data only"),
                 },
                 MyEndpoint::Connected(ep) => match msg {
-                    Either::Left(_) => todo!(),
-                    Either::Right(msg) => unsafe {
+                    MsgType::ConnectionlessMsg(_) => todo!(),
+                    MsgType::ConnectedMsg(msg) => unsafe {
                         ep.fetch_atomicmsg(msg, res_ioc, res_desc, opts)
                     },
+                    _ => panic!("Plain data only"),
                 },
+                _ => panic!("Plain data only"),
             };
             match err {
                 Ok(_) => break,
@@ -1514,6 +2644,49 @@ impl<I: AtomicDefaultCap> Ofi<I> {
         }
     }
 
+    pub fn fetch_atomicmsg_mr<T: libfabric::AsFiType + Copy>(
+        &mut self,
+        msg: &MsgType<
+            MsgFetchAtomic<T>,
+            MsgFetchAtomicConnected<T>,
+            MsgFetchAtomicMr<T>,
+            MsgFetchAtomicConnectedMr<T>,
+        >,
+        res_ioc: &mut [libfabric::iovec::IocMutMr<T>],
+        res_desc: &mut [MemoryRegionDesc],
+    ) {
+        let opts = AtomicMsgOptions::new();
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(msg) => unsafe {
+                        ep.fetch_atomicmsg_from(msg, res_ioc, res_desc, opts)
+                    },
+                    MsgType::ConnectedMrMsg(_) => todo!(),
+                    _ => panic!("Mr data only"),
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(_) => todo!(),
+                    MsgType::ConnectedMrMsg(msg) => unsafe {
+                        ep.fetch_atomicmsg(msg, res_ioc, res_desc, opts)
+                    },
+                    _ => panic!("Mr data only"),
+                },
+                _ => panic!("Mr data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
     pub fn compare_atomic<T: libfabric::AsFiType>(
         &mut self,
         buf: &[T],
@@ -1555,6 +2728,63 @@ impl<I: AtomicDefaultCap> Ofi<I> {
                         op,
                     )
                 },
+                _ => panic!("Plain data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+    pub fn compare_atomic_mr<T: libfabric::AsFiType + Copy>(
+        &mut self,
+        buf: &MemoryRegionSlice<T>,
+        comp: &MemoryRegionSlice<T>,
+        res: &mut MemoryRegionSlice<T>,
+        dest_addr: u64,
+        desc: &mut MemoryRegionDesc,
+        comp_desc: &mut MemoryRegionDesc,
+        res_desc: &mut MemoryRegionDesc,
+        op: CompareAtomicOp,
+    ) {
+        let (start, _end) = self.remote_mem_addr.unwrap();
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => unsafe {
+                    ep.compare_atomic_to(
+                        buf,
+                        desc,
+                        comp,
+                        comp_desc,
+                        res,
+                        res_desc,
+                        self.mapped_addr.as_ref().unwrap(),
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                        op,
+                    )
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => unsafe {
+                    ep.compare_atomic(
+                        buf,
+                        desc,
+                        comp,
+                        comp_desc,
+                        res,
+                        res_desc,
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                        op,
+                    )
+                },
+                _ => panic!("Mr data only"),
             };
             match err {
                 Ok(_) => break,
@@ -1611,6 +2841,64 @@ impl<I: AtomicDefaultCap> Ofi<I> {
                         op,
                     )
                 },
+                _ => panic!("Plain data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn compare_atomicv_mr<T: libfabric::AsFiType + Copy>(
+        &mut self,
+        ioc: &[libfabric::iovec::IocMr<T>],
+        comp_ioc: &[libfabric::iovec::IocMr<T>],
+        res_ioc: &mut [libfabric::iovec::IocMutMr<T>],
+        dest_addr: u64,
+        desc: &mut [MemoryRegionDesc],
+        comp_desc: &mut [MemoryRegionDesc],
+        res_desc: &mut [MemoryRegionDesc],
+        op: CompareAtomicOp,
+    ) {
+        let (start, _end) = self.remote_mem_addr.unwrap();
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => unsafe {
+                    ep.compare_atomicv_to(
+                        ioc,
+                        desc,
+                        comp_ioc,
+                        comp_desc,
+                        res_ioc,
+                        res_desc,
+                        self.mapped_addr.as_ref().unwrap(),
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                        op,
+                    )
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => unsafe {
+                    ep.compare_atomicv(
+                        ioc,
+                        desc,
+                        comp_ioc,
+                        comp_desc,
+                        res_ioc,
+                        res_desc,
+                        start + dest_addr,
+                        self.remote_key.as_ref().unwrap(),
+                        op,
+                    )
+                },
+                _ => panic!("Plain data only"),
             };
             match err {
                 Ok(_) => break,
@@ -1628,7 +2916,12 @@ impl<I: AtomicDefaultCap> Ofi<I> {
 
     pub fn compare_atomicmsg<T: libfabric::AsFiType>(
         &mut self,
-        msg: &Either<MsgCompareAtomic<T>, MsgCompareAtomicConnected<T>>,
+        msg: &MsgType<
+            MsgCompareAtomic<T>,
+            MsgCompareAtomicConnected<T>,
+            MsgCompareAtomicMr<T>,
+            MsgCompareAtomicConnectedMr<T>,
+        >,
         comp_ioc: &[libfabric::iovec::Ioc<T>],
         res_ioc: &mut [libfabric::iovec::IocMut<T>],
         comp_desc: &mut [MemoryRegionDesc],
@@ -1638,17 +2931,66 @@ impl<I: AtomicDefaultCap> Ofi<I> {
         loop {
             let err = match &self.ep {
                 MyEndpoint::Connectionless(ep) => match msg {
-                    Either::Left(msg) => unsafe {
+                    MsgType::ConnectionlessMsg(msg) => unsafe {
                         ep.compare_atomicmsg_to(msg, comp_ioc, comp_desc, res_ioc, res_desc, opts)
                     },
-                    Either::Right(_) => todo!(),
+                    MsgType::ConnectedMsg(_) => todo!(),
+                    _ => panic!("Plain data only"),
                 },
                 MyEndpoint::Connected(ep) => match msg {
-                    Either::Left(_) => todo!(),
-                    Either::Right(msg) => unsafe {
+                    MsgType::ConnectionlessMsg(_) => todo!(),
+                    MsgType::ConnectedMsg(msg) => unsafe {
                         ep.compare_atomicmsg(msg, comp_ioc, comp_desc, res_ioc, res_desc, opts)
                     },
+                    _ => panic!("Plain data only"),
                 },
+                _ => panic!("Plain data only"),
+            };
+            match err {
+                Ok(_) => break,
+                Err(err) => {
+                    if !matches!(err.kind, ErrorKind::TryAgain) {
+                        panic!("{:?}", err);
+                    }
+                }
+            }
+
+            ft_progress(self.cq_type.tx_cq());
+            ft_progress(self.cq_type.rx_cq());
+        }
+    }
+
+    pub fn compare_atomicmsg_mr<T: libfabric::AsFiType + Copy>(
+        &mut self,
+        msg: &MsgType<
+            MsgCompareAtomic<T>,
+            MsgCompareAtomicConnected<T>,
+            MsgCompareAtomicMr<T>,
+            MsgCompareAtomicConnectedMr<T>,
+        >,
+        comp_ioc: &[libfabric::iovec::IocMr<T>],
+        res_ioc: &mut [libfabric::iovec::IocMutMr<T>],
+        comp_desc: &mut [MemoryRegionDesc],
+        res_desc: &mut [MemoryRegionDesc],
+    ) {
+        let opts = AtomicMsgOptions::new();
+        loop {
+            let err = match &self.ep {
+                MyEndpoint::ConnectionlessMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(msg) => unsafe {
+                        ep.compare_atomicmsg_to(msg, comp_ioc, comp_desc, res_ioc, res_desc, opts)
+                    },
+                    MsgType::ConnectedMsg(_) => todo!(),
+                    _ => panic!("Mr data only"),
+                },
+                MyEndpoint::ConnectedMrLocal(ep) => match msg {
+                    MsgType::ConnectionlessMrMsg(_) => todo!(),
+                    MsgType::ConnectedMrMsg(msg) => unsafe {
+                        ep.compare_atomicmsg(msg, comp_ioc, comp_desc, res_ioc, res_desc, opts)
+                    },
+                    _ => panic!("Mr data only"),
+                },
+                _ => panic!("Mr data only"),
             };
             match err {
                 Ok(_) => break,
@@ -1828,7 +3170,20 @@ fn sendrecv(server: bool, name: &str, connected: bool) {
 
     if server {
         // Send a single buffer
-        ofi.send_with_context(&reg_mem[..512], &mut desc[0], None, &mut ctx);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.send_with_context(&reg_mem[..512], &mut desc[0], None, &mut ctx)
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr_with_context(&mr.slice(0).slice(..512), &mut desc[0], None, &mut ctx);
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.send_with_context(&reg_mem[..512], &mut desc[0], None, &mut ctx)
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr_with_context(&mr.slice(0).slice(..512), &mut desc[0], None, &mut ctx);
+            }
+        }
 
         let completion = ofi.cq_type.tx_cq().sread(1, -1).unwrap();
         match completion {
@@ -1841,12 +3196,31 @@ fn sendrecv(server: bool, name: &str, connected: bool) {
         assert!(std::mem::size_of_val(&reg_mem[..128]) <= ofi.info_entry.tx_attr().inject_size());
 
         // Inject a buffer
-        ofi.send(&reg_mem[..128], &mut desc[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[..128], &mut desc[0], None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(..128), &mut desc[0], None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[..128], &mut desc[0], None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(..128), &mut desc[0], None)
+            }
+        }
+        // ofi.send(&reg_mem[..128], &mut desc[0], None);
         // No cq.sread since inject does not generate completions
 
         // // Send single Iov
         let iov = [IoVec::from_slice(&reg_mem[..512])];
-        ofi.sendv(&iov, &mut desc[..1]);
+        let mem_mrs = (mr.slice(0).slice(..512), mr.slice(0).slice(512..1024));
+        let iov_mr = [IoVecMr::from(&mem_mrs.0)];
+
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.sendv(&iov, &mut desc[..1]),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.sendv_mr(&iov_mr, &mut desc[..1]),
+            MyEndpoint::Connectionless(_) => ofi.sendv(&iov, &mut desc[..1]),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.sendv_mr(&iov_mr, &mut desc[..1]),
+        }
+
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // Send multi Iov
@@ -1854,7 +3228,14 @@ fn sendrecv(server: bool, name: &str, connected: bool) {
             IoVec::from_slice(&reg_mem[..512]),
             IoVec::from_slice(&reg_mem[512..1024]),
         ];
-        ofi.sendv(&iov, &mut desc);
+        // Send multi Iov
+        let iov_mr = [IoVecMr::from(&mem_mrs.0), IoVecMr::from(&mem_mrs.1)];
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.sendv(&iov, &mut desc),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.sendv_mr(&iov_mr, &mut desc),
+            MyEndpoint::Connectionless(_) => ofi.sendv(&iov, &mut desc),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.sendv_mr(&iov_mr, &mut desc),
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
     } else {
         let expected: Vec<_> = (0..1024 * 2)
@@ -1864,20 +3245,52 @@ fn sendrecv(server: bool, name: &str, connected: bool) {
         reg_mem.iter_mut().for_each(|v| *v = 0);
 
         // Receive a single buffer
-        ofi.recv(&mut reg_mem[..512], &mut desc[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[..512], &mut desc[0]),
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[..512], &mut desc[0]),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(..512), &mut desc[0])
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(..512), &mut desc[0])
+            }
+        }
+
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(reg_mem[..512], expected[..512]);
 
         // Receive inject
         reg_mem.iter_mut().for_each(|v| *v = 0);
-        ofi.recv(&mut reg_mem[..128], &mut desc[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[..128], &mut desc[0]),
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[..128], &mut desc[0]),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(..128), &mut desc[0])
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(..128), &mut desc[0])
+            }
+        }
+
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(reg_mem[..128], expected[..128]);
 
         reg_mem.iter_mut().for_each(|v| *v = 0);
         // // Receive into a single Iov
         let mut iov = [IoVecMut::from_slice(&mut reg_mem[..512])];
-        ofi.recvv(&mut iov, &mut desc[..1]);
+        let mem_mrs = (
+            &mut mr.slice(0).slice(..512),
+            &mut mr.slice(0).slice(512..1024),
+        );
+
+        let mut iov_mr = [IoVecMutMr::from(mem_mrs.0)];
+
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recvv(&mut iov, &mut desc[..1]),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.recvv_mr(&mut iov_mr, &mut desc[..1]),
+            MyEndpoint::Connectionless(_) => ofi.recvv(&mut iov, &mut desc[..1]),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.recvv_mr(&mut iov_mr, &mut desc[..1]),
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(reg_mem[..512], expected[..512]);
 
@@ -1886,7 +3299,13 @@ fn sendrecv(server: bool, name: &str, connected: bool) {
         // // Receive into multiple Iovs
         let (mem0, mem1) = reg_mem[..1024].split_at_mut(512);
         let iov = [IoVecMut::from_slice(mem0), IoVecMut::from_slice(mem1)];
-        ofi.recvv(&iov, &mut desc);
+        let iov_mr = [IoVecMutMr::from(mem_mrs.0), IoVecMutMr::from(mem_mrs.1)];
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recvv(&iov, &mut desc),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.recvv_mr(&iov_mr, &mut desc),
+            MyEndpoint::Connectionless(_) => ofi.recvv(&iov, &mut desc),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.recvv_mr(&iov_mr, &mut desc),
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
 
         assert_eq!(mem0, &expected[..512]);
@@ -1943,7 +3362,18 @@ fn sendrecvdata(server: bool, name: &str, connected: bool) {
     let data = Some(128u64);
     if server {
         // Send a single buffer
-        ofi.send(&reg_mem[..512], &mut desc[0], data);
+
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[..512], &mut desc[0], data),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(..512), &mut desc[0], data)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[..512], &mut desc[0], data),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(..512), &mut desc[0], data)
+            }
+        }
+
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
     } else {
         let expected: Vec<_> = (0..1024 * 2)
@@ -1953,7 +3383,16 @@ fn sendrecvdata(server: bool, name: &str, connected: bool) {
         reg_mem.iter_mut().for_each(|v| *v = 0);
 
         // Receive a single buffer
-        ofi.recv(&mut reg_mem[..512], &mut desc[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[..512], &mut desc[0]),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(..512), &mut desc[0])
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[..512], &mut desc[0]),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(..512), &mut desc[0])
+            }
+        }
 
         let entry = ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         match entry {
@@ -1986,6 +3425,8 @@ fn conn_sendrecvdata1() {
 
 fn bind_mr<E: 'static>(ep: &MyEndpoint<E>, mr: &DisabledMemoryRegion) {
     match ep {
+        MyEndpoint::ConnectedMrLocal(ep) => mr.bind_ep(ep).unwrap(),
+        MyEndpoint::ConnectionlessMrLocal(ep) => mr.bind_ep(ep).unwrap(),
         MyEndpoint::Connected(ep) => mr.bind_ep(ep).unwrap(),
         MyEndpoint::Connectionless(ep) => mr.bind_ep(ep).unwrap(),
     }
@@ -2021,7 +3462,16 @@ fn tsendrecv(server: bool, name: &str, connected: bool) {
 
     if server {
         // Send a single buffer
-        ofi.tsend(&reg_mem[..512], &mut desc[0], 10, data);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.tsend(&reg_mem[..512], &mut desc[0], 10, data),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.tsend_mr(&mr.slice(0).slice(..512), &mut desc[0], 10, data)
+            }
+            MyEndpoint::Connectionless(_) => ofi.tsend(&reg_mem[..512], &mut desc[0], 10, data),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.tsend_mr(&mr.slice(0).slice(..512), &mut desc[0], 10, data)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
         // match entry {
         //     Completion::Tagged(entry) => {assert_eq!(entry[0].data(), data.unwrap()); assert_eq!(entry[0].tag(), 10)},
@@ -2031,12 +3481,31 @@ fn tsendrecv(server: bool, name: &str, connected: bool) {
         assert!(std::mem::size_of_val(&reg_mem[..128]) <= ofi.info_entry.tx_attr().inject_size());
 
         // Inject a buffer
-        ofi.tsend(&reg_mem[..128], &mut desc[0], 1, data);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.tsend(&reg_mem[..128], &mut desc[0], 1, data),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.tsend_mr(&mr.slice(0).slice(..128), &mut desc[0], 1, data)
+            }
+            MyEndpoint::Connectionless(_) => ofi.tsend(&reg_mem[..128], &mut desc[0], 1, data),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.tsend_mr(&mr.slice(0).slice(..128), &mut desc[0], 1, data)
+            }
+        }
+
         // No cq.sread since inject does not generate completions
 
         // // Send single Iov
         let iov = [IoVec::from_slice(&reg_mem[..512])];
-        ofi.tsendv(&iov, &mut desc[..1], 2);
+        let mem_mr0 = mr.slice(0).slice(..512);
+        let mem_mr1 = mr.slice(0).slice(512..1024);
+        let iov_mr = [IoVecMr::from(&mem_mr0)];
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.tsendv(&iov, &mut desc[..1], 2),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.tsendv_mr(&iov_mr, &mut desc[..1], 2),
+            MyEndpoint::Connectionless(_) => ofi.tsendv(&iov, &mut desc[..1], 2),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.tsendv_mr(&iov_mr, &mut desc[..1], 2),
+        }
+
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // Send multi Iov
@@ -2044,7 +3513,14 @@ fn tsendrecv(server: bool, name: &str, connected: bool) {
             IoVec::from_slice(&reg_mem[..512]),
             IoVec::from_slice(&reg_mem[512..1024]),
         ];
-        ofi.tsendv(&iov, &mut desc, 3);
+        let iov_mr = [IoVecMr::from(&mem_mr0), IoVecMr::from(&mem_mr1)];
+
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.tsendv(&iov, &mut desc, 3),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.tsendv_mr(&iov_mr, &mut desc, 3),
+            MyEndpoint::Connectionless(_) => ofi.tsendv(&iov, &mut desc, 3),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.tsendv_mr(&iov_mr, &mut desc, 3),
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
     } else {
         let expected: Vec<_> = (0..1024 * 2)
@@ -2054,7 +3530,17 @@ fn tsendrecv(server: bool, name: &str, connected: bool) {
         reg_mem.iter_mut().for_each(|v| *v = 0);
 
         // Receive a single buffer
-        ofi.trecv(&mut reg_mem[..512], &mut desc[0], 10);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.trecv(&mut reg_mem[..512], &mut desc[0], 10),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.trecv_mr(&mut mr.slice(0).slice(..512), &mut desc[0], 10)
+            }
+            MyEndpoint::Connectionless(_) => ofi.trecv(&mut reg_mem[..512], &mut desc[0], 10),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.trecv_mr(&mut mr.slice(0).slice(..512), &mut desc[0], 10)
+            }
+        }
+
         let entry = ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         match entry {
             Completion::Tagged(entry) => {
@@ -2067,14 +3553,35 @@ fn tsendrecv(server: bool, name: &str, connected: bool) {
 
         // Receive inject
         reg_mem.iter_mut().for_each(|v| *v = 0);
-        ofi.trecv(&mut reg_mem[..128], &mut desc[0], 1);
+
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.trecv(&mut reg_mem[..128], &mut desc[0], 1),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.trecv_mr(&mut mr.slice(0).slice(..128), &mut desc[0], 1)
+            }
+            MyEndpoint::Connectionless(_) => ofi.trecv(&mut reg_mem[..128], &mut desc[0], 1),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.trecv_mr(&mut mr.slice(0).slice(..128), &mut desc[0], 1)
+            }
+        }
+
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(reg_mem[..128], expected[..128]);
 
         reg_mem.iter_mut().for_each(|v| *v = 0);
         // // Receive into a single Iov
         let mut iov = [IoVecMut::from_slice(&mut reg_mem[..512])];
-        ofi.trecvv(&mut iov, &mut desc[..1], 2);
+        let mut mem_mr0 = mr.slice(0).slice(..512);
+        let mut mem_mr1 = mr.slice(0).slice(512..1024);
+        let mut iov_mr = [IoVecMutMr::from(&mut mem_mr0)];
+
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.trecvv(&mut iov, &mut desc[..1], 2),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.trecvv_mr(&mut iov_mr, &mut desc[..1], 2),
+            MyEndpoint::Connectionless(_) => ofi.trecvv(&mut iov, &mut desc[..1], 2),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.trecvv_mr(&mut iov_mr, &mut desc[..1], 2),
+        }
+
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(reg_mem[..512], expected[..512]);
 
@@ -2083,7 +3590,17 @@ fn tsendrecv(server: bool, name: &str, connected: bool) {
         // // Receive into multiple Iovs
         let (mem0, mem1) = reg_mem[..1024].split_at_mut(512);
         let iov = [IoVecMut::from_slice(mem0), IoVecMut::from_slice(mem1)];
-        ofi.trecvv(&iov, &mut desc, 3);
+        let iov_mr = [
+            IoVecMutMr::from(&mut mem_mr0),
+            IoVecMutMr::from(&mut mem_mr1),
+        ];
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.trecvv(&iov, &mut desc, 3),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.trecvv_mr(&iov_mr, &mut desc, 3),
+            MyEndpoint::Connectionless(_) => ofi.trecvv(&iov, &mut desc, 3),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.trecvv_mr(&iov_mr, &mut desc, 3),
+        }
+
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
 
         assert_eq!(mem0, &expected[..512]);
@@ -2143,18 +3660,33 @@ fn sendrecvmsg(server: bool, name: &str, connected: bool) {
     if server {
         // Single iov message
         let (mem0, mem1) = (&reg_mem[..512], &reg_mem[1024..1536]);
+        let (mem_mr0, mem_mr1) = (&mr.slice(0).slice(..512), &mr.slice(0).slice(1024..1536));
+
         let iov0 = IoVec::from_slice(mem0);
         let iov1 = IoVec::from_slice(mem1);
-        let msg = if connected {
-            Either::Right(MsgConnected::from_iov(&iov0, &mut descs[0], 128))
-        } else {
-            Either::Left(Msg::from_iov(
-                &iov0,
-                &mut descs[0],
-                mapped_addr.as_ref().unwrap(),
-                128,
-            ))
-        };
+
+        let iov_mr0 = IoVecMr::from(mem_mr0);
+        let iov_mr1 = IoVecMr::from(mem_mr1);
+
+        let msg =
+            match &ofi.ep {
+                MyEndpoint::Connected(_) => {
+                    MsgType::ConnectedMsg(MsgConnected::from_iov(&iov0, &mut descs[0], 128))
+                }
+                MyEndpoint::ConnectedMrLocal(_) => {
+                    MsgType::ConnectedMrMsg(MsgConnectedMr::from_iov(&iov_mr0, &mut descs[0], 128))
+                }
+                MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(Msg::from_iov(
+                    &iov0,
+                    &mut descs[0],
+                    mapped_addr.as_ref().unwrap(),
+                    128,
+                )),
+                MyEndpoint::ConnectionlessMrLocal(_) => MsgType::ConnectionlessMrMsg(
+                    MsgMr::from_iov(&iov_mr0, &mut descs[0], mapped_addr.as_ref().unwrap(), 128),
+                ),
+            };
+
         ofi.sendmsg(&msg);
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
         // let entry =
@@ -2165,15 +3697,24 @@ fn sendrecvmsg(server: bool, name: &str, connected: bool) {
 
         // Multi iov message with stride
         let iovs = [iov0, iov1];
-        let msg = if connected {
-            Either::Right(MsgConnected::from_iov_slice(&iovs, &mut descs, 128))
-        } else {
-            Either::Left(Msg::from_iov_slice(
+        let iovs_mr = [iov_mr0, iov_mr1];
+
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                MsgType::ConnectedMsg(MsgConnected::from_iov_slice(&iovs, &mut descs, 128))
+            }
+            MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                MsgConnectedMr::from_iov_mr_slice(&iovs_mr, &mut descs, 128),
+            ),
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(Msg::from_iov_slice(
                 &iovs,
                 &mut descs,
                 mapped_addr.as_ref().unwrap(),
                 128,
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => MsgType::ConnectionlessMrMsg(
+                MsgMr::from_iov_mr_slice(&iovs_mr, &mut descs, mapped_addr.as_ref().unwrap(), 128),
+            ),
         };
 
         ofi.sendmsg(&msg);
@@ -2185,47 +3726,77 @@ fn sendrecvmsg(server: bool, name: &str, connected: bool) {
         // }
 
         // Single iov message
-        let msg = if connected {
-            Either::Right(MsgConnected::from_iov(&iovs[0], &mut descs[0], 0))
-        } else {
-            Either::Left(Msg::from_iov(
-                &iovs[0],
-                &mut descs[0],
-                mapped_addr.as_ref().unwrap(),
-                0,
-            ))
-        };
+        let msg =
+            match &ofi.ep {
+                MyEndpoint::Connected(_) => {
+                    MsgType::ConnectedMsg(MsgConnected::from_iov(&iovs[0], &mut descs[0], 0))
+                }
+                MyEndpoint::ConnectedMrLocal(_) => {
+                    MsgType::ConnectedMrMsg(MsgConnectedMr::from_iov(&iovs_mr[0], &mut descs[0], 0))
+                }
+                MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(Msg::from_iov(
+                    &iovs[0],
+                    &mut descs[0],
+                    mapped_addr.as_ref().unwrap(),
+                    0,
+                )),
+                MyEndpoint::ConnectionlessMrLocal(_) => MsgType::ConnectionlessMrMsg(
+                    MsgMr::from_iov(&iovs_mr[0], &mut descs[0], mapped_addr.as_ref().unwrap(), 0),
+                ),
+            };
 
         ofi.sendmsg(&msg);
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
-        let msg = if connected {
-            Either::Right(MsgConnected::from_iov_slice(&iovs, &mut descs, 0))
-        } else {
-            Either::Left(Msg::from_iov_slice(
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                MsgType::ConnectedMsg(MsgConnected::from_iov_slice(&iovs, &mut descs, 0))
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                MsgType::ConnectedMrMsg(MsgConnectedMr::from_iov_mr_slice(&iovs_mr, &mut descs, 0))
+            }
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(Msg::from_iov_slice(
                 &iovs,
                 &mut descs,
                 mapped_addr.as_ref().unwrap(),
                 0,
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => MsgType::ConnectionlessMrMsg(
+                MsgMr::from_iov_mr_slice(&iovs_mr, &mut descs, mapped_addr.as_ref().unwrap(), 0),
+            ),
         };
+
         ofi.sendmsg(&msg);
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
     } else {
         reg_mem.iter_mut().for_each(|v| *v = 0);
         let (mem0, mem1) = reg_mem.split_at_mut(512);
+        let (mem_mr0, mut mem_mr1) = (
+            &mut mr.slice(0).slice(..512),
+            &mut mr.slice(0).slice(512..1536),
+        );
+
         let expected: Vec<_> = (0..1024).map(|v: usize| (v % 256) as u8).collect();
 
         // Receive a single message in a single buffer
         let mut iov = IoVecMut::from_slice(mem0);
-        let msg = if connected {
-            Either::Right(MsgConnectedMut::from_iov(&mut iov, &mut descs[0]))
-        } else {
-            Either::Left(MsgMut::from_iov(
+        let mut iov_mr = IoVecMutMr::from(mem_mr0);
+
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                MsgType::ConnectedMsg(MsgConnectedMut::from_iov(&mut iov, &mut descs[0]))
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                MsgType::ConnectedMrMsg(MsgConnectedMutMr::from_iov(&mut iov_mr, &mut descs[0]))
+            }
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(MsgMut::from_iov(
                 &mut iov,
                 &mut descs[0],
                 mapped_addr.as_ref().unwrap(),
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => MsgType::ConnectionlessMrMsg(
+                MsgMutMr::from_iov(&mut iov_mr, &mut descs[0], mapped_addr.as_ref().unwrap()),
+            ),
         };
 
         ofi.recvmsg(&msg);
@@ -2240,18 +3811,36 @@ fn sendrecvmsg(server: bool, name: &str, connected: bool) {
 
         // Receive a multi iov message in a single buffer
         let mut iov = IoVecMut::from_slice(&mut mem1[..1024]);
-        let msg = if connected {
-            Either::Right(MsgConnectedMut::from_iov(&mut iov, &mut descs[0]))
-        } else {
-            Either::Left(MsgMut::from_iov(
+        let mut iov_mr = IoVecMutMr::from(&mut mem_mr1);
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                MsgType::ConnectedMsg(MsgConnectedMut::from_iov(&mut iov, &mut descs[0]))
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                MsgType::ConnectedMrMsg(MsgConnectedMutMr::from_iov(&mut iov_mr, &mut descs[0]))
+            }
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(MsgMut::from_iov(
                 &mut iov,
                 &mut descs[0],
                 mapped_addr.as_ref().unwrap(),
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => MsgType::ConnectionlessMrMsg(
+                MsgMutMr::from_iov(&mut iov_mr, &mut descs[0], mapped_addr.as_ref().unwrap()),
+            ),
         };
 
         ofi.recvmsg(&msg);
-        ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+        let err = ofi.cq_type.rx_cq().sread(1, -1);
+        match err {
+            Ok(_) => {}
+            Err(e) => match e.kind {
+                ErrorKind::ErrorAvailable => {
+                    let err = ofi.cq_type.rx_cq().readerr(0);
+                    err.unwrap();
+                }
+                _ => todo!(),
+            },
+        }
         // let entry =
         // match entry {
         //     Completion::Data(entry) => assert_eq!(entry[0].data(), 128),
@@ -2262,18 +3851,37 @@ fn sendrecvmsg(server: bool, name: &str, connected: bool) {
         // Receive a single iov message into two buffers
         reg_mem.iter_mut().for_each(|v| *v = 0);
         let (mem0, mem1) = reg_mem.split_at_mut(512);
+        let (mut mem_mr0, mut mem_mr1) = (
+            &mut mr.slice(0).slice(..256),
+            &mut mr.slice(0).slice(512..768),
+        );
         let iov = IoVecMut::from_slice(&mut mem0[..256]);
+        let iov_mr = IoVecMutMr::from(&mut mem_mr0);
+        let iov_mr1 = IoVecMutMr::from(&mut mem_mr1);
+
         let iov1 = IoVecMut::from_slice(&mut mem1[..256]);
         let mut iovs = [iov, iov1];
-        let msg = if connected {
-            Either::Right(MsgConnectedMut::from_iov_slice(&mut iovs, &mut descs))
-        } else {
-            Either::Left(MsgMut::from_iov_slice(
-                &mut iovs,
-                &mut descs,
-                mapped_addr.as_ref().unwrap(),
-            ))
-        };
+        let mut iovs_mr = [iov_mr, iov_mr1];
+
+        let msg =
+            match &ofi.ep {
+                MyEndpoint::Connected(_) => {
+                    MsgType::ConnectedMsg(MsgConnectedMut::from_iov_slice(&mut iovs, &mut descs))
+                }
+                MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                    MsgConnectedMutMr::from_iov_mr_slice(&mut iovs_mr, &mut descs),
+                ),
+                MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(
+                    MsgMut::from_iov_slice(&mut iovs, &mut descs, mapped_addr.as_ref().unwrap()),
+                ),
+                MyEndpoint::ConnectionlessMrLocal(_) => {
+                    MsgType::ConnectionlessMrMsg(MsgMutMr::from_iov_mr_slice(
+                        &mut iovs_mr,
+                        &mut descs,
+                        mapped_addr.as_ref().unwrap(),
+                    ))
+                }
+            };
 
         ofi.recvmsg(&msg);
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
@@ -2285,16 +3893,34 @@ fn sendrecvmsg(server: bool, name: &str, connected: bool) {
         let (mem0, mem1) = reg_mem.split_at_mut(512);
         let iov = IoVecMut::from_slice(&mut mem0[..512]);
         let iov1 = IoVecMut::from_slice(&mut mem1[..512]);
+        let (mut mem_mr0, mut mem_mr1) = (
+            &mut mr.slice(0).slice(..512),
+            &mut mr.slice(0).slice(512..1024),
+        );
+        let iov_mr = IoVecMutMr::from(&mut mem_mr0);
+        let iov_mr1 = IoVecMutMr::from(&mut mem_mr1);
         let mut iovs = [iov, iov1];
-        let msg = if connected {
-            Either::Right(MsgConnectedMut::from_iov_slice(&mut iovs, &mut descs))
-        } else {
-            Either::Left(MsgMut::from_iov_slice(
-                &mut iovs,
-                &mut descs,
-                mapped_addr.as_ref().unwrap(),
-            ))
-        };
+        let mut iovs_mr = [iov_mr, iov_mr1];
+
+        let msg =
+            match &ofi.ep {
+                MyEndpoint::Connected(_) => {
+                    MsgType::ConnectedMsg(MsgConnectedMut::from_iov_slice(&mut iovs, &mut descs))
+                }
+                MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                    MsgConnectedMutMr::from_iov_mr_slice(&mut iovs_mr, &mut descs),
+                ),
+                MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(
+                    MsgMut::from_iov_slice(&mut iovs, &mut descs, mapped_addr.as_ref().unwrap()),
+                ),
+                MyEndpoint::ConnectionlessMrLocal(_) => {
+                    MsgType::ConnectionlessMrMsg(MsgMutMr::from_iov_mr_slice(
+                        &mut iovs_mr,
+                        &mut descs,
+                        mapped_addr.as_ref().unwrap(),
+                    ))
+                }
+            };
 
         ofi.recvmsg(&msg);
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
@@ -2354,25 +3980,40 @@ fn tsendrecvmsg(server: bool, name: &str, connected: bool) {
     if server {
         // Single iov message
         let (mem0, mem1) = (&reg_mem[..512], &reg_mem[1024..1536]);
+        let (mem0_slice, mem1_slice) = (&mr.slice(0).slice(..512), &mr.slice(0).slice(1024..1536));
         let iov0 = IoVec::from_slice(mem0);
         let iov1 = IoVec::from_slice(mem1);
-        let msg = if connected {
-            Either::Right(MsgTaggedConnected::from_iov(
+        let iov0_mr = IoVecMr::from(mem0_slice);
+        let iov1_mr = IoVecMr::from(mem1_slice);
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => MsgType::ConnectedMsg(MsgTaggedConnected::from_iov(
                 &iov0,
                 &mut descs[0],
                 128,
                 0,
                 0,
-            ))
-        } else {
-            Either::Left(MsgTagged::from_iov(
+            )),
+            MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                MsgTaggedConnectedMr::from_iov_mr(&iov0_mr, &mut descs[0], 128, 0, 0),
+            ),
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(MsgTagged::from_iov(
                 &iov0,
                 &mut descs[0],
                 mapped_addr.as_ref().unwrap(),
                 128,
                 0,
                 0,
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgTaggedMr::from_iov_mr(
+                    &iov0_mr,
+                    &mut descs[0],
+                    mapped_addr.as_ref().unwrap(),
+                    128,
+                    0,
+                    0,
+                ))
+            }
         };
         ofi.tsendmsg(&msg);
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
@@ -2384,85 +4025,137 @@ fn tsendrecvmsg(server: bool, name: &str, connected: bool) {
 
         // Multi iov message with stride
         let iovs = [iov0, iov1];
-        let msg = if connected {
-            Either::Right(MsgTaggedConnected::from_iov_slice(
+        let mr_iovs = [iov0_mr, iov1_mr];
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => MsgType::ConnectedMsg(MsgTaggedConnected::from_iov_slice(
                 &iovs, &mut descs, 0, 1, 0,
-            ))
-        } else {
-            Either::Left(MsgTagged::from_iov_slice(
+            )),
+            MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                MsgTaggedConnectedMr::from_iov_slice(&mr_iovs, &mut descs, 0, 1, 0),
+            ),
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(MsgTagged::from_iov_slice(
                 &iovs,
                 &mut descs,
                 mapped_addr.as_ref().unwrap(),
                 0,
                 1,
                 0,
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgTaggedMr::from_iov_slice(
+                    &mr_iovs,
+                    &mut descs,
+                    mapped_addr.as_ref().unwrap(),
+                    0,
+                    1,
+                    0,
+                ))
+            }
         };
 
         ofi.tsendmsg(&msg);
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // Single iov message
-        let msg = if connected {
-            Either::Right(MsgTaggedConnected::from_iov(
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => MsgType::ConnectedMsg(MsgTaggedConnected::from_iov(
                 &iovs[0],
                 &mut descs[0],
                 0,
                 2,
                 0,
-            ))
-        } else {
-            Either::Left(MsgTagged::from_iov(
+            )),
+            MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                MsgTaggedConnectedMr::from_iov_mr(&mr_iovs[0], &mut descs[0], 0, 2, 0),
+            ),
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(MsgTagged::from_iov(
                 &iovs[0],
                 &mut descs[0],
                 mapped_addr.as_ref().unwrap(),
                 0,
                 2,
                 0,
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgTaggedMr::from_iov_mr(
+                    &mr_iovs[0],
+                    &mut descs[0],
+                    mapped_addr.as_ref().unwrap(),
+                    0,
+                    2,
+                    0,
+                ))
+            }
         };
 
         ofi.tsendmsg(&msg);
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
-        let msg = if connected {
-            Either::Right(MsgTaggedConnected::from_iov_slice(
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => MsgType::ConnectedMsg(MsgTaggedConnected::from_iov_slice(
                 &iovs, &mut descs, 0, 3, 0,
-            ))
-        } else {
-            Either::Left(MsgTagged::from_iov_slice(
+            )),
+            MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                MsgTaggedConnectedMr::from_iov_slice(&mr_iovs, &mut descs, 0, 3, 0),
+            ),
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(MsgTagged::from_iov_slice(
                 &iovs,
                 &mut descs,
                 mapped_addr.as_ref().unwrap(),
                 0,
                 3,
                 0,
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgTaggedMr::from_iov_slice(
+                    &mr_iovs,
+                    &mut descs,
+                    mapped_addr.as_ref().unwrap(),
+                    0,
+                    3,
+                    0,
+                ))
+            }
         };
+
         ofi.tsendmsg(&msg);
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
     } else {
         reg_mem.iter_mut().for_each(|v| *v = 0);
         let (mem0, mem1) = reg_mem.split_at_mut(512);
+        let (mem0_mr, mem1_mr) = (&mut mr.slice(0).slice(..512), &mut mr.slice(0).slice(512..));
         let expected: Vec<_> = (0..1024).map(|v: usize| (v % 256) as u8).collect();
 
         // Receive a single message in a single buffer
         let mut iov = IoVecMut::from_slice(mem0);
-        let msg = if connected {
-            Either::Right(MsgTaggedConnectedMut::from_iov(
+        let mut iov_mr = IoVecMutMr::from(mem0_mr);
+
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => MsgType::ConnectedMsg(MsgTaggedConnectedMut::from_iov(
                 &mut iov,
                 &mut descs[0],
                 0,
                 0,
-            ))
-        } else {
-            Either::Left(MsgTaggedMut::from_iov(
+            )),
+            MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                MsgTaggedConnectedMutMr::from_iov_mr(&mut iov_mr, &mut descs[0], 0, 0),
+            ),
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(MsgTaggedMut::from_iov(
                 &mut iov,
                 &mut descs[0],
                 mapped_addr.as_ref().unwrap(),
                 0,
                 0,
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgTaggedMutMr::from_iov_mr(
+                    &mut iov_mr,
+                    &mut descs[0],
+                    mapped_addr.as_ref().unwrap(),
+                    0,
+                    0,
+                ))
+            }
         };
 
         ofi.trecvmsg(&msg);
@@ -2477,45 +4170,82 @@ fn tsendrecvmsg(server: bool, name: &str, connected: bool) {
 
         // Receive a multi iov message in a single buffer
         let mut iov = IoVecMut::from_slice(&mut mem1[..1024]);
-        let msg = if connected {
-            Either::Right(MsgTaggedConnectedMut::from_iov(
+        let mem1_mr_1024 = &mut mem1_mr.slice(..1024);
+        let mut iov_mr = IoVecMutMr::from(mem1_mr_1024);
+
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => MsgType::ConnectedMsg(MsgTaggedConnectedMut::from_iov(
                 &mut iov,
                 &mut descs[0],
                 1,
                 0,
-            ))
-        } else {
-            Either::Left(MsgTaggedMut::from_iov(
+            )),
+            MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                MsgTaggedConnectedMutMr::from_iov_mr(&mut iov_mr, &mut descs[0], 0, 0),
+            ),
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(MsgTaggedMut::from_iov(
                 &mut iov,
                 &mut descs[0],
                 mapped_addr.as_ref().unwrap(),
                 1,
                 0,
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgTaggedMutMr::from_iov_mr(
+                    &mut iov_mr,
+                    &mut descs[0],
+                    mapped_addr.as_ref().unwrap(),
+                    1,
+                    0,
+                ))
+            }
         };
 
         ofi.trecvmsg(&msg);
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
         assert_eq!(mem1[..1024], expected);
 
         // Receive a single iov message into two buffers
         reg_mem.iter_mut().for_each(|v| *v = 0);
         let (mem0, mem1) = reg_mem.split_at_mut(512);
+        let (mem0_mr, mem1_mr) = (
+            &mut mr.slice(0).slice(..256),
+            &mut mr.slice(0).slice(512..768),
+        );
         let iov = IoVecMut::from_slice(&mut mem0[..256]);
         let iov1 = IoVecMut::from_slice(&mut mem1[..256]);
+        let iov_mr = IoVecMutMr::from(mem0_mr);
+        let iov1_mr = IoVecMutMr::from(mem1_mr);
+
         let mut iovs = [iov, iov1];
-        let msg = if connected {
-            Either::Right(MsgTaggedConnectedMut::from_iov_slice(
-                &mut iovs, &mut descs, 2, 0,
-            ))
-        } else {
-            Either::Left(MsgTaggedMut::from_iov_slice(
-                &mut iovs,
-                &mut descs,
-                mapped_addr.as_ref().unwrap(),
-                2,
-                0,
-            ))
+        let mut iovs_mr = [iov_mr, iov1_mr];
+
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => MsgType::ConnectedMsg(
+                MsgTaggedConnectedMut::from_iov_slice(&mut iovs, &mut descs, 2, 0),
+            ),
+            MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                MsgTaggedConnectedMutMr::from_iov_mr_slice(&mut iovs_mr, &mut descs, 2, 0),
+            ),
+            MyEndpoint::Connectionless(_) => {
+                MsgType::ConnectionlessMsg(MsgTaggedMut::from_iov_slice(
+                    &mut iovs,
+                    &mut descs,
+                    mapped_addr.as_ref().unwrap(),
+                    2,
+                    0,
+                ))
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgTaggedMutMr::from_iov_mr_slice(
+                    &mut iovs_mr,
+                    &mut descs,
+                    mapped_addr.as_ref().unwrap(),
+                    2,
+                    0,
+                ))
+            }
         };
 
         ofi.trecvmsg(&msg);
@@ -2528,19 +4258,38 @@ fn tsendrecvmsg(server: bool, name: &str, connected: bool) {
         let (mem0, mem1) = reg_mem.split_at_mut(512);
         let iov = IoVecMut::from_slice(&mut mem0[..512]);
         let iov1 = IoVecMut::from_slice(&mut mem1[..512]);
+        let (mem0_mr, mem1_mr) = (
+            &mut mr.slice(0).slice(..512),
+            &mut mr.slice(0).slice(512..1024),
+        );
         let mut iovs = [iov, iov1];
-        let msg = if connected {
-            Either::Right(MsgTaggedConnectedMut::from_iov_slice(
-                &mut iovs, &mut descs, 3, 0,
-            ))
-        } else {
-            Either::Left(MsgTaggedMut::from_iov_slice(
-                &mut iovs,
-                &mut descs,
-                mapped_addr.as_ref().unwrap(),
-                3,
-                0,
-            ))
+        let mut iovs_mr = [IoVecMutMr::from(mem0_mr), IoVecMutMr::from(mem1_mr)];
+
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => MsgType::ConnectedMsg(
+                MsgTaggedConnectedMut::from_iov_slice(&mut iovs, &mut descs, 3, 0),
+            ),
+            MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                MsgTaggedConnectedMutMr::from_iov_mr_slice(&mut iovs_mr, &mut descs, 3, 0),
+            ),
+            MyEndpoint::Connectionless(_) => {
+                MsgType::ConnectionlessMsg(MsgTaggedMut::from_iov_slice(
+                    &mut iovs,
+                    &mut descs,
+                    mapped_addr.as_ref().unwrap(),
+                    3,
+                    0,
+                ))
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgTaggedMutMr::from_iov_mr_slice(
+                    &mut iovs_mr,
+                    &mut descs,
+                    mapped_addr.as_ref().unwrap(),
+                    3,
+                    0,
+                ))
+            }
         };
 
         ofi.trecvmsg(&msg);
@@ -2610,18 +4359,67 @@ fn writeread(server: bool, name: &str, connected: bool) {
     let expected: Vec<_> = (0..1024).map(|v: usize| (v % 256) as u8).collect();
     if server {
         // Write inject a single buffer
-        ofi.write(&reg_mem[..128], 0, &mut descs[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.write(&reg_mem[..128], 0, &mut descs[0], None);
 
-        // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+                // Send completion ack
+                ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.write_mr(&mr.slice(0).slice(..128), 0, &mut descs[0], None);
+
+                // Send completion ack
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None);
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.write(&reg_mem[..128], 0, &mut descs[0], None);
+
+                // Send completion ack
+                ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.write_mr(&mr.slice(0).slice(..128), 0, &mut descs[0], None);
+
+                // Send completion ack
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None);
+            }
+        }
+
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // Write a single buffer
-        ofi.write(&reg_mem[..512], 0, &mut descs[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.write(&reg_mem[..512], 0, &mut descs[0], None);
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.write_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], None);
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.write(&reg_mem[..512], 0, &mut descs[0], None);
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.write_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], None);
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None);
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None);
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // Write vector of buffers
@@ -2629,50 +4427,162 @@ fn writeread(server: bool, name: &str, connected: bool) {
             IoVec::from_slice(&reg_mem[..512]),
             IoVec::from_slice(&reg_mem[512..1024]),
         ];
-        ofi.writev(&iovs, 0, &mut descs);
+
+        let slices = (mr.slice(0).slice(..512), mr.slice(0).slice(512..1024));
+        let iov_slices = [IoVecMr::from(&slices.0), IoVecMr::from(&slices.1)];
+
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.writev(&iovs, 0, &mut descs),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.writev_mr(&iov_slices, 0, &mut descs),
+            MyEndpoint::Connectionless(_) => ofi.writev(&iovs, 0, &mut descs),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.writev_mr(&iov_slices, 0, &mut descs),
+        }
+
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None);
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None);
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0]);
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0]);
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
     } else {
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0]);
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0]);
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..128], &expected[..128]);
 
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0]);
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0]);
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..512], &expected[..512]);
 
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[1024..1536], &mut descs[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.recv(&mut reg_mem[1024..1536], &mut descs[0]);
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(1024..1536), &mut descs[0]);
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.recv(&mut reg_mem[1024..1536], &mut descs[0]);
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(1024..1536), &mut descs[0]);
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..1024], &expected[..1024]);
 
         reg_mem.iter_mut().for_each(|v| *v = 0);
 
         // Read buffer from remote memory
-        ofi.read(&mut reg_mem[1024..1536], 0, &mut descs[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.read(&mut reg_mem[1024..1536], 0, &mut descs[0]);
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.read_mr(&mut mr.slice(0).slice(1024..1536), 0, &mut descs[0]);
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.read(&mut reg_mem[1024..1536], 0, &mut descs[0]);
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.read_mr(&mut mr.slice(0).slice(1024..1536), 0, &mut descs[0]);
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[1024..1536], &expected[512..1024]);
 
         // Read vector of buffers from remote memory
         let (mem0, mem1) = reg_mem[1536..].split_at_mut(256);
         let iovs = [IoVecMut::from_slice(mem0), IoVecMut::from_slice(mem1)];
-        ofi.readv(&iovs, 0, &mut descs);
+        let mut slices = (mr.slice(0).slice(1536..1792), mr.slice(0).slice(1792..));
+        let iov_slices = [
+            IoVecMutMr::from(&mut slices.0),
+            IoVecMutMr::from(&mut slices.1),
+        ];
+
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.readv(&iovs, 0, &mut descs),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.readv_mr(&iov_slices, 0, &mut descs),
+            MyEndpoint::Connectionless(_) => ofi.readv(&iovs, 0, &mut descs),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.readv_mr(&iov_slices, 0, &mut descs),
+        };
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         assert_eq!(mem0, &expected[..256]);
         assert_eq!(mem1, &expected[..256]);
 
         // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None);
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None);
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
     }
 }
@@ -2745,60 +4655,128 @@ fn writereadmsg(server: bool, name: &str, connected: bool) {
             .mapped_key(ofi.remote_key.as_ref().unwrap());
 
         let iov = IoVec::from_slice(&reg_mem[..128]);
-        let msg = if connected {
-            Either::Right(MsgRmaConnected::from_iov(&iov, &mut descs[0], &rma_iov, 0))
-        } else {
-            Either::Left(MsgRma::from_iov(
+        let mem_mr = mr.slice(0).slice(..128);
+        let iov_mr = IoVecMr::from(&mem_mr);
+
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                MsgType::ConnectedMsg(MsgRmaConnected::from_iov(&iov, &mut descs[0], &rma_iov, 0))
+            }
+            MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                MsgRmaConnectedMr::from_iov_mr(&iov_mr, &mut descs[0], &rma_iov, 0),
+            ),
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(MsgRma::from_iov(
                 &iov,
                 &mut descs[0],
                 mapped_addr.as_ref().unwrap(),
                 &rma_iov,
                 0,
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgRmaMr::from_iov_mr(
+                    &iov_mr,
+                    &mut descs[0],
+                    mapped_addr.as_ref().unwrap(),
+                    &rma_iov,
+                    0,
+                ))
+            }
         };
 
         // Write inject a single buffer
         ofi.writemsg(&msg);
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-
         // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         let iov = IoVec::from_slice(&reg_mem[..512]);
+        let mem_mr = mr.slice(0).slice(..512);
+        let iov_mr = IoVecMr::from(&mem_mr);
+
         let rma_iov = RmaIoVec::new()
             .address(start)
             .len(512)
             .mapped_key(ofi.remote_key.as_ref().unwrap());
 
-        let msg = if connected {
-            Either::Right(MsgRmaConnected::from_iov(
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => MsgType::ConnectedMsg(MsgRmaConnected::from_iov(
                 &iov,
                 &mut descs[0],
                 &rma_iov,
                 128,
-            ))
-        } else {
-            Either::Left(MsgRma::from_iov(
+            )),
+            MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                MsgRmaConnectedMr::from_iov_mr(&iov_mr, &mut descs[0], &rma_iov, 128),
+            ),
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(MsgRma::from_iov(
                 &iov,
                 &mut descs[0],
                 mapped_addr.as_ref().unwrap(),
                 &rma_iov,
                 128,
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgRmaMr::from_iov_mr(
+                    &iov_mr,
+                    &mut descs[0],
+                    mapped_addr.as_ref().unwrap(),
+                    &rma_iov,
+                    128,
+                ))
+            }
         };
+
+        // let msg = if connected {
+        //     MsgType::ConnectedMsg(MsgRmaConnected::from_iov(
+        //         &iov,
+        //         &mut descs[0],
+        //         &rma_iov,
+        //         128,
+        //     ))
+        // } else {
+        //     MsgType::ConnectionlessMsg(MsgRma::from_iov(
+        //         &iov,
+        //         &mut descs[0],
+        //         mapped_addr.as_ref().unwrap(),
+        //         &rma_iov,
+        //         128,
+        //     ))
+        // };
 
         // Write a single buffer
         ofi.writemsg(&msg);
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         let iov0 = IoVec::from_slice(&reg_mem[..512]);
         let iov1 = IoVec::from_slice(&reg_mem[512..1024]);
+        let (mem_mr0, mem_mr1) = (mr.slice(0).slice(..512), mr.slice(0).slice(512..1024));
+        let (iov_mr0, iov_mr1) = (IoVecMr::from(&mem_mr0), IoVecMr::from(&mem_mr1));
+
         let iovs = [iov0, iov1];
+        let iovs_mr = [iov_mr0, iov_mr1];
         let rma_iov0 = RmaIoVec::new()
             .address(start)
             .len(512)
@@ -2810,43 +4788,101 @@ fn writereadmsg(server: bool, name: &str, connected: bool) {
             .mapped_key(ofi.remote_key.as_ref().unwrap());
         let rma_iovs = [rma_iov0, rma_iov1];
 
-        let msg = if connected {
-            Either::Right(MsgRmaConnected::from_iov_slice(
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => MsgType::ConnectedMsg(MsgRmaConnected::from_iov_slice(
                 &iovs, &mut descs, &rma_iovs, 0,
-            ))
-        } else {
-            Either::Left(MsgRma::from_iov_slice(
+            )),
+            MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                MsgRmaConnectedMr::from_iov_slice(&iovs_mr, &mut descs, &rma_iovs, 0),
+            ),
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(MsgRma::from_iov_slice(
                 &iovs,
                 &mut descs,
                 mapped_addr.as_ref().unwrap(),
                 &rma_iovs,
                 0,
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgRmaMr::from_iov_mr_slice(
+                    &iovs_mr,
+                    &mut descs,
+                    mapped_addr.as_ref().unwrap(),
+                    &rma_iovs,
+                    0,
+                ))
+            }
         };
 
         ofi.writemsg(&msg);
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
-        // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+        // Recv completion ack
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
     } else {
-        // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+        // Recv completion ack
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+        }
+
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..128], &expected[..128]);
 
-        // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+        // Recv completion ack
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..512], &expected[..512]);
 
-        // Recv a completion ack
-        ofi.recv(&mut reg_mem[1024..1536], &mut descs[0]);
+        // Recv completion ack
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[1024..1536], &mut descs[0]),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(1024..1536), &mut descs[0])
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[1024..1536], &mut descs[0]),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(1024..1536), &mut descs[0])
+            }
+        }
+
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..1024], &expected[..1024]);
 
@@ -2854,25 +4890,40 @@ fn writereadmsg(server: bool, name: &str, connected: bool) {
 
         {
             let mut iov = IoVecMut::from_slice(&mut reg_mem[1024..1536]);
+            let mut mem_mr = mr.slice(0).slice(1024..1536);
+            let mut iov_mr = IoVecMutMr::from(&mut mem_mr);
+
             let rma_iov = RmaIoVec::new()
                 .address(start)
                 .len(512)
                 .mapped_key(ofi.remote_key.as_ref().unwrap());
+
             // Read buffer from remote memory
-            let msg = if connected {
-                Either::Right(MsgRmaConnectedMut::from_iov(
+            let msg = match &ofi.ep {
+                MyEndpoint::Connected(_) => MsgType::ConnectedMsg(MsgRmaConnectedMut::from_iov(
                     &mut iov,
                     &mut descs[0],
                     &rma_iov,
-                ))
-            } else {
-                Either::Left(MsgRmaMut::from_iov(
+                )),
+                MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                    MsgRmaConnectedMutMr::from_iov_mr(&mut iov_mr, &mut descs[0], &rma_iov),
+                ),
+                MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(MsgRmaMut::from_iov(
                     &mut iov,
                     &mut descs[0],
                     mapped_addr.as_ref().unwrap(),
                     &rma_iov,
-                ))
+                )),
+                MyEndpoint::ConnectionlessMrLocal(_) => {
+                    MsgType::ConnectionlessMrMsg(MsgRmaMutMr::from_iov_mr(
+                        &mut iov_mr,
+                        &mut descs[0],
+                        mapped_addr.as_ref().unwrap(),
+                        &rma_iov,
+                    ))
+                }
             };
+
             ofi.readmsg(&msg);
             ofi.cq_type.tx_cq().sread(1, -1).unwrap();
             assert_eq!(&reg_mem[1024..1536], &expected[512..1024]);
@@ -2880,7 +4931,15 @@ fn writereadmsg(server: bool, name: &str, connected: bool) {
 
         // // Read vector of buffers from remote memory
         let (mem0, mem1) = reg_mem[1536..].split_at_mut(256);
+        let (mut mem_mr0, mut mem_mr1) =
+            (mr.slice(0).slice(1536..1892), mr.slice(0).slice(1892..2048));
+
         let mut iovs = [IoVecMut::from_slice(mem0), IoVecMut::from_slice(mem1)];
+        let mut iovs_mr = [
+            IoVecMutMr::from(&mut mem_mr0),
+            IoVecMutMr::from(&mut mem_mr1),
+        ];
+
         let rma_iov0 = RmaIoVec::new()
             .address(start)
             .len(256)
@@ -2891,18 +4950,29 @@ fn writereadmsg(server: bool, name: &str, connected: bool) {
             .mapped_key(ofi.remote_key.as_ref().unwrap());
         let rma_iovs = [rma_iov0, rma_iov1];
 
-        let msg = if connected {
-            Either::Right(MsgRmaConnectedMut::from_iov_slice(
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => MsgType::ConnectedMsg(MsgRmaConnectedMut::from_iov_slice(
                 &mut iovs, &mut descs, &rma_iovs,
-            ))
-        } else {
-            Either::Left(MsgRmaMut::from_iov_slice(
+            )),
+            MyEndpoint::ConnectedMrLocal(_) => MsgType::ConnectedMrMsg(
+                MsgRmaConnectedMutMr::from_iov_mr_slice(&mut iovs_mr, &mut descs, &rma_iovs),
+            ),
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(MsgRmaMut::from_iov_slice(
                 &mut iovs,
                 &mut descs,
                 mapped_addr.as_ref().unwrap(),
                 &rma_iovs,
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgRmaMutMr::from_iov_mr_slice(
+                    &mut iovs_mr,
+                    &mut descs,
+                    mapped_addr.as_ref().unwrap(),
+                    &rma_iovs,
+                ))
+            }
         };
+
         ofi.readmsg(&msg);
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
@@ -2910,7 +4980,16 @@ fn writereadmsg(server: bool, name: &str, connected: bool) {
         assert_eq!(mem1, &expected[..256]);
 
         // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
     }
 }
@@ -2970,108 +5049,353 @@ fn atomic(server: bool, name: &str, connected: bool) {
     let key = mr.key().unwrap();
     ofi.exchange_keys(key, reg_mem.as_ptr() as usize, 1024 * 2);
     if server {
-        ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Min);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Min);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
-        ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Max);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Max);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
-        ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Sum);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Sum);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
-        ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Prod);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Prod);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
-        ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Bor);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Bor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
-        ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Band);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Band);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
 
-        // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
-        ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Lor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
-        ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Lor);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Bxor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
-        ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Bxor);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
-        // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
-        ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+                ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
 
-        ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Land);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Land);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
-        ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Lxor);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Lxor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
-        ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::AtomicWrite);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::AtomicWrite);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Min);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Max);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Sum);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Prod);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Bor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Band);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0]);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Lor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Bxor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0]);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Land);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Lxor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(
+                    &mr.slice(0).slice(..512),
+                    0,
+                    &mut descs[0],
+                    AtomicOp::AtomicWrite,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Min);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Max);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Sum);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Prod);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Bor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Band);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Lor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Bxor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Land);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::Lxor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic(&reg_mem[..512], 0, &mut descs[0], AtomicOp::AtomicWrite);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Min);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Max);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Sum);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Prod);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Bor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Band);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0]);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Lor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Bxor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0]);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Land);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(&mr.slice(0).slice(..512), 0, &mut descs[0], AtomicOp::Lxor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.atomic_mr(
+                    &mr.slice(0).slice(..512),
+                    0,
+                    &mut descs[0],
+                    AtomicOp::AtomicWrite,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+            }
+        }
 
         let iocs = [
             Ioc::from_slice(&reg_mem[..256]),
             Ioc::from_slice(&reg_mem[256..512]),
         ];
 
-        ofi.atomicv(&iocs, 0, &mut descs, AtomicOp::Prod);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
-        let err = ofi.cq_type.tx_cq().sread(1, -1);
-        match err {
-            Err(e) => {
-                if matches!(e.kind, libfabric::error::ErrorKind::ErrorAvailable) {
-                    let realerr = ofi.cq_type.tx_cq().readerr(0).unwrap();
-                    panic!("{:?}", realerr.error());
-                }
+        let (mem_mr0, mem_mr1) = (mr.slice(0).slice(..256), mr.slice(0).slice(256..512));
+        let iocs_mr = [IocMr::from(&mem_mr0), IocMr::from(&mem_mr1)];
+
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.atomicv(&iocs, 0, &mut descs, AtomicOp::Prod),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.atomicv_mr(&iocs_mr, 0, &mut descs, AtomicOp::Prod)
             }
-            Ok(_) => {}
+            MyEndpoint::Connectionless(_) => ofi.atomicv(&iocs, 0, &mut descs, AtomicOp::Prod),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.atomicv_mr(&iocs_mr, 0, &mut descs, AtomicOp::Prod)
+            }
         }
 
+        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+        // Send completion ack
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+        }
+
+        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
     } else {
         let mut expected = vec![2u8; 1024 * 2];
 
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+        }
+
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..512], &expected[..512]);
+
         // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+        }
+
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         expected = vec![3; 1024 * 2];
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..512], &expected[..512]);
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+        // Send completion ack
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // expected = vec![2;1024*2];
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         // assert_eq!(&reg_mem[..512], &expected[..512]);
 
         expected = vec![4; 1024 * 2];
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..512], &expected[..512]);
 
         // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
     }
 }
@@ -3135,114 +5459,567 @@ fn fetch_atomic(server: bool, name: &str, connected: bool) {
     if server {
         let mut expected: Vec<_> = vec![1; 256];
         let (op_mem, ack_mem) = reg_mem.split_at_mut(512);
+        let (op_mem_mr, mut ack_mem_mr) = (mr.slice(0).slice(..512), mr.slice(0).slice(512..1024));
         let (mem0, mem1) = op_mem.split_at_mut(256);
-        ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Min);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        assert_eq!(mem1, &expected[..256]);
+        let (mem_mr0, mut mem_mr1) = (op_mem_mr.slice(..256), op_mem_mr.slice(256..));
 
-        expected = vec![1; 256];
-        ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Max);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        assert_eq!(mem1, &expected);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Min);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected[..256]);
 
-        expected = vec![2; 256];
-        ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Sum);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        assert_eq!(mem1, &expected);
+                expected = vec![1; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Max);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
 
-        expected = vec![4; 256];
-        ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Prod);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        assert_eq!(mem1, &expected);
+                expected = vec![2; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Sum);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
 
-        expected = vec![8; 256];
-        ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Bor);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        assert_eq!(mem1, &expected);
+                expected = vec![4; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Prod);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
 
-        expected = vec![10; 256];
-        ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Band);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        assert_eq!(mem1, &expected);
+                expected = vec![8; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Bor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
 
-        // Send a done ack
-        ofi.send(&ack_mem[..512], &mut desc0, None);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        // Send a done ack
+                expected = vec![10; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Band);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
 
-        ofi.recv(&mut ack_mem[..512], &mut desc0);
-        ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+                // Send a done ack
+                ofi.send(&ack_mem[..512], &mut desc0, None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                // Send a done ack
 
-        expected = vec![2; 256];
-        ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Lor);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        assert_eq!(mem1, &expected);
+                ofi.recv(&mut ack_mem[..512], &mut desc0);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
 
-        expected = vec![1; 256];
-        ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Bxor);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        assert_eq!(mem1, &expected);
+                expected = vec![2; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Lor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
 
-        // Send a done ack
-        ofi.send(&ack_mem[..512], &mut desc0, None);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        // Send a done ack
+                expected = vec![1; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Bxor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
 
-        ofi.recv(&mut ack_mem[..512], &mut desc0);
-        ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+                // Send a done ack
+                ofi.send(&ack_mem[..512], &mut desc0, None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                // Send a done ack
 
-        expected = vec![3; 256];
-        ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Land);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        assert_eq!(mem1, &expected);
+                ofi.recv(&mut ack_mem[..512], &mut desc0);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
 
-        expected = vec![1; 256];
-        ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Lxor);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        assert_eq!(mem1, &expected);
+                expected = vec![3; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Land);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
 
-        expected = vec![0; 256];
-        ofi.fetch_atomic(
-            &mem0,
-            mem1,
-            0,
-            &mut desc0,
-            &mut desc1,
-            FetchAtomicOp::AtomicWrite,
-        );
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        assert_eq!(mem1, &expected);
+                expected = vec![1; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Lxor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
 
-        // Send a done ack
-        ofi.send(&ack_mem[..512], &mut desc0, None);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        // Send a done ack
+                expected = vec![0; 256];
+                ofi.fetch_atomic(
+                    &mem0,
+                    mem1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::AtomicWrite,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
 
-        ofi.recv(&mut ack_mem[..512], &mut desc0);
-        ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+                // Send a done ack
+                ofi.send(&ack_mem[..512], &mut desc0, None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                // Send a done ack
 
-        expected = vec![2; 256];
-        ofi.fetch_atomic(
-            &mem0,
-            mem1,
-            0,
-            &mut desc0,
-            &mut desc1,
-            FetchAtomicOp::AtomicRead,
-        );
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        assert_eq!(mem1, &expected);
+                ofi.recv(&mut ack_mem[..512], &mut desc0);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                expected = vec![2; 256];
+                ofi.fetch_atomic(
+                    &mem0,
+                    mem1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::AtomicRead,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Min,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected[..256]);
+
+                expected = vec![1; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Max,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![2; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Sum,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![4; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Prod,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![8; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Bor,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![10; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Band,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                // Send a done ack
+                ofi.send_mr(&ack_mem_mr, &mut desc0, None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                // Send a done ack
+
+                ofi.recv_mr(&mut ack_mem_mr, &mut desc0);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                expected = vec![2; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Lor,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![1; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Bxor,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                // Send a done ack
+                ofi.send_mr(&ack_mem_mr, &mut desc0, None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                // Send a done ack
+
+                ofi.recv_mr(&mut ack_mem_mr, &mut desc0);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                expected = vec![3; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Land,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![1; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Lxor,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![0; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::AtomicWrite,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                // Send a done ack
+                ofi.send_mr(&ack_mem_mr, &mut desc0, None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                // Send a done ack
+
+                ofi.recv_mr(&mut ack_mem_mr, &mut desc0);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                expected = vec![2; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::AtomicRead,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Min);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected[..256]);
+
+                expected = vec![1; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Max);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![2; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Sum);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![4; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Prod);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![8; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Bor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![10; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Band);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                // Send a done ack
+                ofi.send(&ack_mem[..512], &mut desc0, None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                // Send a done ack
+
+                ofi.recv(&mut ack_mem[..512], &mut desc0);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                expected = vec![2; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Lor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![1; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Bxor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                // Send a done ack
+                ofi.send(&ack_mem[..512], &mut desc0, None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                // Send a done ack
+
+                ofi.recv(&mut ack_mem[..512], &mut desc0);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                expected = vec![3; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Land);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![1; 256];
+                ofi.fetch_atomic(&mem0, mem1, 0, &mut desc0, &mut desc1, FetchAtomicOp::Lxor);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![0; 256];
+                ofi.fetch_atomic(
+                    &mem0,
+                    mem1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::AtomicWrite,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                // Send a done ack
+                ofi.send(&ack_mem[..512], &mut desc0, None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                // Send a done ack
+
+                ofi.recv(&mut ack_mem[..512], &mut desc0);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                expected = vec![2; 256];
+                ofi.fetch_atomic(
+                    &mem0,
+                    mem1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::AtomicRead,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Min,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected[..256]);
+
+                expected = vec![1; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Max,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![2; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Sum,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![4; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Prod,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![8; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Bor,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![10; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Band,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                // Send a done ack
+                ofi.send_mr(&ack_mem_mr, &mut desc0, None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                // Send a done ack
+
+                ofi.recv_mr(&mut ack_mem_mr, &mut desc0);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                expected = vec![2; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Lor,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![1; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Bxor,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                // Send a done ack
+                ofi.send_mr(&ack_mem_mr, &mut desc0, None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                // Send a done ack
+
+                ofi.recv_mr(&mut ack_mem_mr, &mut desc0);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                expected = vec![3; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Land,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![1; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::Lxor,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                expected = vec![0; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::AtomicWrite,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+
+                // Send a done ack
+                ofi.send_mr(&ack_mem_mr, &mut desc0, None);
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                // Send a done ack
+
+                ofi.recv_mr(&mut ack_mem_mr, &mut desc0);
+                ofi.cq_type.rx_cq().sread(1, -1).unwrap();
+
+                expected = vec![2; 256];
+                ofi.fetch_atomic_mr(
+                    &mem_mr0,
+                    &mut mem_mr1,
+                    0,
+                    &mut desc0,
+                    &mut desc1,
+                    FetchAtomicOp::AtomicRead,
+                );
+                ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+                assert_eq!(mem1, &expected);
+            }
+        }
 
         expected = vec![2; 256];
         let (read_mem, write_mem) = op_mem.split_at_mut(256);
+        let (read_mem_mr, write_mem_mr) = (op_mem_mr.slice(..256), op_mem_mr.slice(256..));
+        let (read_mem_mr0, read_mem_mr1) = (read_mem_mr.slice(..128), read_mem_mr.slice(128..));
+        let (mut write_mem_mr0, mut write_mem_mr1) =
+            (write_mem_mr.slice(..128), write_mem_mr.slice(128..));
         let iocs = [
             Ioc::from_slice(&read_mem[..128]),
             Ioc::from_slice(&read_mem[128..256]),
         ];
+
+        let iocs_mr = [IocMr::from(&read_mem_mr0), IocMr::from(&read_mem_mr1)];
+
         let write_mems = write_mem.split_at_mut(128);
         let mut res_iocs = [
             IocMut::from_slice(write_mems.0),
             IocMut::from_slice(write_mems.1),
+        ];
+
+        let mut res_iocs_mr = [
+            IocMutMr::from(&mut write_mem_mr0),
+            IocMutMr::from(&mut write_mem_mr1),
         ];
 
         let desc0 = mr.description();
@@ -3251,58 +6028,169 @@ fn fetch_atomic(server: bool, name: &str, connected: bool) {
         let desc3 = mr.description();
         let mut descs = [desc0, desc1];
         let mut res_descs = [desc2, desc3];
-        ofi.fetch_atomicv(
-            &iocs,
-            &mut res_iocs,
-            0,
-            &mut descs,
-            &mut res_descs,
-            FetchAtomicOp::Prod,
-        );
+
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.fetch_atomicv(
+                &iocs,
+                &mut res_iocs,
+                0,
+                &mut descs,
+                &mut res_descs,
+                FetchAtomicOp::Prod,
+            ),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.fetch_atomicv_mr(
+                &iocs_mr,
+                &mut res_iocs_mr,
+                0,
+                &mut descs,
+                &mut res_descs,
+                FetchAtomicOp::Prod,
+            ),
+            MyEndpoint::Connectionless(_) => ofi.fetch_atomicv(
+                &iocs,
+                &mut res_iocs,
+                0,
+                &mut descs,
+                &mut res_descs,
+                FetchAtomicOp::Prod,
+            ),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.fetch_atomicv_mr(
+                &iocs_mr,
+                &mut res_iocs_mr,
+                0,
+                &mut descs,
+                &mut res_descs,
+                FetchAtomicOp::Prod,
+            ),
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
         assert_eq!(write_mem, &expected);
 
         // Send a done ack
-        ofi.send(&ack_mem[..512], &mut descs[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&ack_mem[..512], &mut descs[0], None),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.send_mr(&ack_mem_mr, &mut descs[0], None),
+            MyEndpoint::Connectionless(_) => ofi.send(&ack_mem[..512], &mut descs[0], None),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.send_mr(&ack_mem_mr, &mut descs[0], None),
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // Recv a completion ack
-        ofi.recv(&mut ack_mem[..512], &mut descs[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut ack_mem[..512], &mut descs[0]),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.recv_mr(&mut ack_mem_mr, &mut descs[0]),
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut ack_mem[..512], &mut descs[0]),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.recv_mr(&mut ack_mem_mr, &mut descs[0]),
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
     } else {
         let mut expected = vec![2u8; 256];
 
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut desc0);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc0),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc0)
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc0),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc0)
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..256], &expected);
-
         // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut desc0, None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut desc0, None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut desc0, None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut desc0, None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut desc0, None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         expected = vec![3; 256];
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut desc0);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc0),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc0)
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc0),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc0)
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..256], &expected);
-        ofi.send(&reg_mem[512..1024], &mut desc0, None);
+        // Send completion ack
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut desc0, None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut desc0, None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut desc0, None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut desc0, None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         expected = vec![2; 256];
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut desc0);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc0),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc0)
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc0),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc0)
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..256], &expected);
-        ofi.send(&reg_mem[512..1024], &mut desc0, None);
+        // Send completion ack
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut desc0, None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut desc0, None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut desc0, None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut desc0, None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         expected = vec![4; 256];
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut desc0);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc0),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc0)
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc0),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc0)
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..256], &expected);
-        ofi.send(&reg_mem[512..1024], &mut desc0, None);
+        // Send completion ack
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut desc0, None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut desc0, None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut desc0, None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut desc0, None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
     }
 }
@@ -3365,102 +6253,352 @@ fn compare_atomic(server: bool, name: &str, connected: bool) {
     if server {
         let mut expected: Vec<_> = vec![1; 256];
         let (op_mem, ack_mem) = reg_mem.split_at_mut(768);
+        let (op_mem_mr, mut ack_mem_mr) = (mr.slice(0).slice(..768), mr.slice(0).slice(768..1280));
         let (buf, mem1) = op_mem.split_at_mut(256);
         let (comp, res) = mem1.split_at_mut(256);
         comp.iter_mut().for_each(|v| *v = 1);
-
-        ofi.compare_atomic(
-            &buf,
-            comp,
-            res,
-            0,
-            &mut desc,
-            &mut comp_desc,
-            &mut res_desc,
-            CompareAtomicOp::Cswap,
-        );
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.compare_atomic(
+                    &buf,
+                    comp,
+                    res,
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::Cswap,
+                );
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.compare_atomic_mr(
+                    &mr.slice(0).slice(0..256),
+                    &mr.slice(0).slice(256..512),
+                    &mut mr.slice(0).slice(512..768),
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::Cswap,
+                );
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.compare_atomic(
+                    &buf,
+                    comp,
+                    res,
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::Cswap,
+                );
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.compare_atomic_mr(
+                    &mr.slice(0).slice(0..256),
+                    &mr.slice(0).slice(256..512),
+                    &mut mr.slice(0).slice(512..768),
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::Cswap,
+                );
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
         assert_eq!(res, &expected[..256]);
 
         expected = vec![2; 256];
-        ofi.compare_atomic(
-            &buf,
-            comp,
-            res,
-            0,
-            &mut desc,
-            &mut comp_desc,
-            &mut res_desc,
-            CompareAtomicOp::CswapNe,
-        );
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.compare_atomic(
+                    &buf,
+                    comp,
+                    res,
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapNe,
+                );
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.compare_atomic_mr(
+                    &mr.slice(0).slice(0..256),
+                    &mr.slice(0).slice(256..512),
+                    &mut mr.slice(0).slice(512..768),
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapNe,
+                );
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.compare_atomic(
+                    &buf,
+                    comp,
+                    res,
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapNe,
+                );
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.compare_atomic_mr(
+                    &mr.slice(0).slice(0..256),
+                    &mr.slice(0).slice(256..512),
+                    &mut mr.slice(0).slice(512..768),
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapNe,
+                );
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
         assert_eq!(res, &expected);
 
         buf.iter_mut().for_each(|v| *v = 3);
         expected = vec![2; 256];
-        ofi.compare_atomic(
-            &buf,
-            comp,
-            res,
-            0,
-            &mut desc,
-            &mut comp_desc,
-            &mut res_desc,
-            CompareAtomicOp::CswapLe,
-        );
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.compare_atomic(
+                    &buf,
+                    comp,
+                    res,
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapLe,
+                );
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.compare_atomic_mr(
+                    &mr.slice(0).slice(0..256),
+                    &mr.slice(0).slice(256..512),
+                    &mut mr.slice(0).slice(512..768),
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapLe,
+                );
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.compare_atomic(
+                    &buf,
+                    comp,
+                    res,
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapLe,
+                );
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.compare_atomic_mr(
+                    &mr.slice(0).slice(0..256),
+                    &mr.slice(0).slice(256..512),
+                    &mut mr.slice(0).slice(512..768),
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapLe,
+                );
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
         assert_eq!(res, &expected);
 
         buf.iter_mut().for_each(|v| *v = 2);
         expected = vec![3; 256];
-        ofi.compare_atomic(
-            &buf,
-            comp,
-            res,
-            0,
-            &mut desc,
-            &mut comp_desc,
-            &mut res_desc,
-            CompareAtomicOp::CswapLt,
-        );
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.compare_atomic(
+                    &buf,
+                    comp,
+                    res,
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapLt,
+                );
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.compare_atomic_mr(
+                    &mr.slice(0).slice(0..256),
+                    &mr.slice(0).slice(256..512),
+                    &mut mr.slice(0).slice(512..768),
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapLt,
+                );
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.compare_atomic(
+                    &buf,
+                    comp,
+                    res,
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapLt,
+                );
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.compare_atomic_mr(
+                    &mr.slice(0).slice(0..256),
+                    &mr.slice(0).slice(256..512),
+                    &mut mr.slice(0).slice(512..768),
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapLt,
+                );
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
         assert_eq!(res, &expected);
 
         buf.iter_mut().for_each(|v| *v = 3);
         expected = vec![2; 256];
-        ofi.compare_atomic(
-            &buf,
-            comp,
-            res,
-            0,
-            &mut desc,
-            &mut comp_desc,
-            &mut res_desc,
-            CompareAtomicOp::CswapGe,
-        );
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.compare_atomic(
+                    &buf,
+                    comp,
+                    res,
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapGe,
+                );
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.compare_atomic_mr(
+                    &mr.slice(0).slice(0..256),
+                    &mr.slice(0).slice(256..512),
+                    &mut mr.slice(0).slice(512..768),
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapGe,
+                );
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.compare_atomic(
+                    &buf,
+                    comp,
+                    res,
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapGe,
+                );
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.compare_atomic_mr(
+                    &mr.slice(0).slice(0..256),
+                    &mr.slice(0).slice(256..512),
+                    &mut mr.slice(0).slice(512..768),
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapGe,
+                );
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
         assert_eq!(res, &expected);
 
         expected = vec![2; 256];
-        ofi.compare_atomic(
-            &buf,
-            comp,
-            res,
-            0,
-            &mut desc,
-            &mut comp_desc,
-            &mut res_desc,
-            CompareAtomicOp::CswapGt,
-        );
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.compare_atomic(
+                    &buf,
+                    comp,
+                    res,
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapGt,
+                );
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.compare_atomic_mr(
+                    &mr.slice(0).slice(0..256),
+                    &mr.slice(0).slice(256..512),
+                    &mut mr.slice(0).slice(512..768),
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapGt,
+                );
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.compare_atomic(
+                    &buf,
+                    comp,
+                    res,
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapGt,
+                );
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.compare_atomic_mr(
+                    &mr.slice(0).slice(0..256),
+                    &mr.slice(0).slice(256..512),
+                    &mut mr.slice(0).slice(512..768),
+                    0,
+                    &mut desc,
+                    &mut comp_desc,
+                    &mut res_desc,
+                    CompareAtomicOp::CswapGt,
+                );
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
         assert_eq!(res, &expected);
 
         // Send a done ack
-        ofi.send(&ack_mem[..512], &mut desc, None);
-        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-        // Send a done ack
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&ack_mem[..512], &mut desc, None),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.send_mr(&ack_mem_mr, &mut desc, None),
+            MyEndpoint::Connectionless(_) => ofi.send(&ack_mem[..512], &mut desc, None),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.send_mr(&ack_mem_mr, &mut desc, None),
+        }
 
-        ofi.recv(&mut ack_mem[..512], &mut desc);
+        ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut ack_mem[..512], &mut desc),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.recv_mr(&mut ack_mem_mr, &mut desc),
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut ack_mem[..512], &mut desc),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.recv_mr(&mut ack_mem_mr, &mut desc),
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
 
         // expected = vec![2; 256];
@@ -3471,48 +6609,151 @@ fn compare_atomic(server: bool, name: &str, connected: bool) {
         let buf_iocs = [Ioc::from_slice(&buf0), Ioc::from_slice(&buf1)];
         let comp_iocs = [Ioc::from_slice(&comp0), Ioc::from_slice(&comp1)];
         let mut res_iocs = [IocMut::from_slice(res0), IocMut::from_slice(res1)];
+
+        let buf_slices = (&mr.slice(0).slice(..128), &mr.slice(0).slice(128..256));
+        let buf_iocs_mr = [IocMr::from(buf_slices.0), IocMr::from(buf_slices.1)];
+
+        let comp_slices = (&mr.slice(0).slice(256..384), &mr.slice(0).slice(384..512));
+        let comp_iocs_mr = [IocMr::from(comp_slices.0), IocMr::from(comp_slices.1)];
+
+        let mut res_slices = (
+            &mut mr.slice(0).slice(512..640),
+            &mut mr.slice(0).slice(640..768),
+        );
+
+        let mut res_iocs_mr = [
+            IocMutMr::from(&mut res_slices.0),
+            IocMutMr::from(&mut res_slices.1),
+        ];
         let mut buf_descs = [mr.description(), mr.description()];
         let mut comp_descs = [mr.description(), mr.description()];
         let mut res_descs = [mr.description(), mr.description()];
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                ofi.compare_atomicv(
+                    &buf_iocs,
+                    &comp_iocs,
+                    &mut res_iocs,
+                    0,
+                    &mut buf_descs,
+                    &mut comp_descs,
+                    &mut res_descs,
+                    CompareAtomicOp::CswapLe,
+                );
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.compare_atomicv_mr(
+                    &buf_iocs_mr,
+                    &comp_iocs_mr,
+                    &mut res_iocs_mr,
+                    0,
+                    &mut buf_descs,
+                    &mut comp_descs,
+                    &mut res_descs,
+                    CompareAtomicOp::CswapLe,
+                );
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.compare_atomicv(
+                    &buf_iocs,
+                    &comp_iocs,
+                    &mut res_iocs,
+                    0,
+                    &mut buf_descs,
+                    &mut comp_descs,
+                    &mut res_descs,
+                    CompareAtomicOp::CswapLe,
+                );
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.compare_atomicv_mr(
+                    &buf_iocs_mr,
+                    &comp_iocs_mr,
+                    &mut res_iocs_mr,
+                    0,
+                    &mut buf_descs,
+                    &mut comp_descs,
+                    &mut res_descs,
+                    CompareAtomicOp::CswapLe,
+                );
+            }
+        }
 
-        ofi.compare_atomicv(
-            &buf_iocs,
-            &comp_iocs,
-            &mut res_iocs,
-            0,
-            &mut buf_descs,
-            &mut comp_descs,
-            &mut res_descs,
-            CompareAtomicOp::CswapLe,
-        );
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
         assert_eq!(res, &expected);
 
         // Send a done ack
-        ofi.send(&ack_mem[..512], &mut desc, None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&ack_mem[..512], &mut desc, None),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.send_mr(&ack_mem_mr, &mut desc, None),
+            MyEndpoint::Connectionless(_) => ofi.send(&ack_mem[..512], &mut desc, None),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.send_mr(&ack_mem_mr, &mut desc, None),
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // Recv a completion ack
-        ofi.recv(&mut ack_mem[..512], &mut desc);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut ack_mem[..512], &mut desc),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.recv_mr(&mut ack_mem_mr, &mut desc),
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut ack_mem[..512], &mut desc),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.recv_mr(&mut ack_mem_mr, &mut desc),
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
     } else {
         let mut expected = vec![2u8; 256];
 
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut desc);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc)
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc)
+            }
+        }
+
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..256], &expected);
 
         // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut desc, None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut desc, None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mut mr.slice(0).slice(512..1024), &mut desc, None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut desc, None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mut mr.slice(0).slice(512..1024), &mut desc, None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         expected = vec![3; 256];
         // // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut desc);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc)
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc)
+            }
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..256], &expected);
-        ofi.send(&reg_mem[512..1024], &mut desc, None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut desc, None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mut mr.slice(0).slice(512..1024), &mut desc, None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut desc, None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mut mr.slice(0).slice(512..1024), &mut desc, None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
     }
 }
@@ -3578,47 +6819,105 @@ fn atomicmsg(server: bool, name: &str, connected: bool) {
             Ioc::from_slice(&reg_mem[..256]),
             Ioc::from_slice(&reg_mem[256..512]),
         ];
+        let (mem_mr0, mem_mr1) = (mr.slice(0).slice(..256), mr.slice(0).slice(256..512));
+        let iocs_mr = [IocMr::from(&mem_mr0), IocMr::from(&mem_mr1)];
+
         let rma_ioc0 = RmaIoc::new(start, 256, ofi.remote_key.as_ref().unwrap());
         let rma_ioc1 = RmaIoc::new(start + 256, 256, ofi.remote_key.as_ref().unwrap());
         let rma_iocs = [rma_ioc0, rma_ioc1];
 
-        let msg = if connected {
-            Either::Right(MsgAtomicConnected::from_ioc_slice(
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => MsgType::ConnectedMsg(MsgAtomicConnected::from_ioc_slice(
                 &iocs,
                 &mut descs,
                 &rma_iocs,
                 AtomicOp::Bor,
                 128,
-            ))
-        } else {
-            Either::Left(MsgAtomic::from_ioc_slice(
+            )),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                MsgType::ConnectedMrMsg(MsgAtomicConnectedMr::from_ioc_mr_slice(
+                    &iocs_mr,
+                    &mut descs,
+                    &rma_iocs,
+                    AtomicOp::Bor,
+                    128,
+                ))
+            }
+            MyEndpoint::Connectionless(_) => MsgType::ConnectionlessMsg(MsgAtomic::from_ioc_slice(
                 &iocs,
                 &mut descs,
                 mapped_addr.as_ref().unwrap(),
                 &rma_iocs,
                 AtomicOp::Bor,
                 128,
-            ))
+            )),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgAtomicMr::from_ioc_mr_slice(
+                    &iocs_mr,
+                    &mut descs,
+                    mapped_addr.as_ref().unwrap(),
+                    &rma_iocs,
+                    AtomicOp::Bor,
+                    128,
+                ))
+            }
         };
 
         ofi.atomicmsg(&msg);
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+        }
 
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+        }
+
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
     } else {
         let expected = vec![3u8; 1024 * 2];
-
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut descs[0]);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut descs[0]),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut descs[0])
+            }
+        }
+
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..512], &expected[..512]);
         // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut descs[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut descs[0], None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut descs[0], None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
     }
 }
@@ -3680,16 +6979,33 @@ fn fetch_atomicmsg(server: bool, name: &str, connected: bool) {
     if server {
         let expected = vec![1u8; 256];
         let (op_mem, ack_mem) = reg_mem.split_at_mut(512);
+        let (op_mem_mr, mut ack_mem_mr) =
+            (mr.slice(0).slice(..512), &mut mr.slice(0).slice(512..1024));
 
         let (read_mem, write_mem) = op_mem.split_at_mut(256);
+        let (read_mem_mr, write_mem_mr) = (op_mem_mr.slice(..256), op_mem_mr.slice(256..));
+        let (read_mem_mr0, read_mem_mr1) = (read_mem_mr.slice(..128), read_mem_mr.slice(128..256));
+
         let iocs = [
             Ioc::from_slice(&read_mem[..128]),
             Ioc::from_slice(&read_mem[128..256]),
         ];
+        let iocs_mr = [IocMr::from(&read_mem_mr0), IocMr::from(&read_mem_mr1)];
+
         let write_mems = write_mem.split_at_mut(128);
+        let write_mems_mr = (
+            &mut write_mem_mr.slice(..128),
+            &mut write_mem_mr.slice(128..),
+        );
+
         let mut res_iocs = [
             IocMut::from_slice(write_mems.0),
             IocMut::from_slice(write_mems.1),
+        ];
+
+        let mut res_iocs_mr = [
+            IocMutMr::from(write_mems_mr.0),
+            IocMutMr::from(write_mems_mr.1),
         ];
 
         let desc0 = mr.description();
@@ -3702,47 +7018,108 @@ fn fetch_atomicmsg(server: bool, name: &str, connected: bool) {
         let rma_ioc1 = RmaIoc::new(start + 128, 128, ofi.remote_key.as_ref().unwrap());
         let rma_iocs = [rma_ioc0, rma_ioc1];
 
-        let msg = if connected {
-            Either::Right(MsgFetchAtomicConnected::from_ioc_slice(
-                &iocs,
-                &mut descs,
-                &rma_iocs,
-                FetchAtomicOp::Prod,
-                0,
-            ))
-        } else {
-            Either::Left(MsgFetchAtomic::from_ioc_slice(
-                &iocs,
-                &mut descs,
-                mapped_addr.as_ref().unwrap(),
-                &rma_iocs,
-                FetchAtomicOp::Prod,
-                0,
-            ))
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                MsgType::ConnectedMsg(MsgFetchAtomicConnected::from_ioc_slice(
+                    &iocs,
+                    &mut descs,
+                    &rma_iocs,
+                    FetchAtomicOp::Prod,
+                    0,
+                ))
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                MsgType::ConnectedMrMsg(MsgFetchAtomicConnectedMr::from_ioc_mr_slice(
+                    &iocs_mr,
+                    &mut descs,
+                    &rma_iocs,
+                    FetchAtomicOp::Prod,
+                    0,
+                ))
+            }
+            MyEndpoint::Connectionless(_) => {
+                MsgType::ConnectionlessMsg(MsgFetchAtomic::from_ioc_slice(
+                    &iocs,
+                    &mut descs,
+                    mapped_addr.as_ref().unwrap(),
+                    &rma_iocs,
+                    FetchAtomicOp::Prod,
+                    0,
+                ))
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgFetchAtomicMr::from_ioc_mr_slice(
+                    &iocs_mr,
+                    &mut descs,
+                    mapped_addr.as_ref().unwrap(),
+                    &rma_iocs,
+                    FetchAtomicOp::Prod,
+                    0,
+                ))
+            }
+        };
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.fetch_atomicmsg(&msg, &mut res_iocs, &mut res_descs),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.fetch_atomicmsg_mr(&msg, &mut res_iocs_mr, &mut res_descs)
+            }
+            MyEndpoint::Connectionless(_) => {
+                ofi.fetch_atomicmsg(&msg, &mut res_iocs, &mut res_descs)
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.fetch_atomicmsg_mr(&msg, &mut res_iocs_mr, &mut res_descs)
+            }
         };
 
-        ofi.fetch_atomicmsg(&msg, &mut res_iocs, &mut res_descs);
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
         assert_eq!(write_mem, &expected);
 
         // Send a done ack
-        ofi.send(&ack_mem[..512], &mut descs[0], None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&ack_mem[..512], &mut descs[0], None),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.send_mr(&ack_mem_mr, &mut descs[0], None),
+            MyEndpoint::Connectionless(_) => ofi.send(&ack_mem[..512], &mut descs[0], None),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.send_mr(&ack_mem_mr, &mut descs[0], None),
+        };
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
 
         // Recv a completion ack
-        ofi.recv(&mut ack_mem[..512], &mut descs[0]);
+
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut ack_mem[..512], &mut descs[0]),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.recv_mr(&mut ack_mem_mr, &mut descs[0]),
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut ack_mem[..512], &mut descs[0]),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.recv_mr(&mut ack_mem_mr, &mut descs[0]),
+        }
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
     } else {
         let mut desc0 = mr.description();
         let expected = vec![2u8; 256];
-
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut desc0);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc0),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc0)
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc0),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc0)
+            }
+        }
+
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..256], &expected);
-
         // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut desc0, None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut desc0, None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut desc0, None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut desc0, None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut desc0, None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
     }
 }
@@ -3807,18 +7184,28 @@ fn compare_atomicmsg(server: bool, name: &str, connected: bool) {
     if server {
         let expected = vec![1u8; 256];
         let (op_mem, ack_mem) = reg_mem.split_at_mut(768);
+        let op_mem_mr = mr.slice(0).slice(..768);
+        let ack_mem_mr = mr.slice(0).slice(768..);
         let (buf, mem1) = op_mem.split_at_mut(256);
+        let (buf_mr, mem1_mr) = (op_mem_mr.slice(..256), op_mem_mr.slice(256..));
         let (comp, res) = mem1.split_at_mut(256);
+        let (comp_mr, res_mr) = (mem1_mr.slice(..256), mem1_mr.slice(256..));
         comp.iter_mut().for_each(|v| *v = 1);
 
         // expected = vec![2; 256];
         let (buf0, buf1) = buf.split_at_mut(128);
         let (comp0, comp1) = comp.split_at_mut(128);
         let (res0, res1) = res.split_at_mut(128);
+        let (buf0_mr, buf1_mr) = (buf_mr.slice(..128), buf_mr.slice(128..));
+        let (comp0_mr, comp1_mr) = (comp_mr.slice(..128), comp_mr.slice(128..));
+        let (res0_mr, res1_mr) = (&mut res_mr.slice(..128), &mut res_mr.slice(128..));
 
         let buf_iocs = [Ioc::from_slice(&buf0), Ioc::from_slice(&buf1)];
         let comp_iocs = [Ioc::from_slice(&comp0), Ioc::from_slice(&comp1)];
         let mut res_iocs = [IocMut::from_slice(res0), IocMut::from_slice(res1)];
+        let buf_iocs_mr = [IocMr::from(&buf0_mr), IocMr::from(&buf1_mr)];
+        let comp_iocs_mr = [IocMr::from(&comp0_mr), IocMr::from(&comp1_mr)];
+        let mut res_iocs_mr = [IocMutMr::from(res0_mr), IocMutMr::from(res1_mr)];
         let mut buf_descs = [mr.description(), mr.description()];
         let mut comp_descs = [mr.description(), mr.description()];
         let mut res_descs = [mr.description(), mr.description()];
@@ -3826,52 +7213,132 @@ fn compare_atomicmsg(server: bool, name: &str, connected: bool) {
         let rma_ioc1 = RmaIoc::new(start + 128, 128, ofi.remote_key.as_ref().unwrap());
         let rma_iocs = [rma_ioc0, rma_ioc1];
 
-        let msg = if connected {
-            Either::Right(MsgCompareAtomicConnected::from_ioc_slice(
-                &buf_iocs,
-                &mut buf_descs,
-                &rma_iocs,
-                CompareAtomicOp::CswapGe,
-                0,
-            ))
-        } else {
-            Either::Left(MsgCompareAtomic::from_ioc_slice(
-                &buf_iocs,
-                &mut buf_descs,
-                mapped_addr.as_ref().unwrap(),
-                &rma_iocs,
-                CompareAtomicOp::CswapGe,
-                0,
-            ))
+        let msg = match &ofi.ep {
+            MyEndpoint::Connected(_) => {
+                MsgType::ConnectedMsg(MsgCompareAtomicConnected::from_ioc_slice(
+                    &buf_iocs,
+                    &mut buf_descs,
+                    &rma_iocs,
+                    CompareAtomicOp::CswapGe,
+                    0,
+                ))
+            }
+            MyEndpoint::ConnectedMrLocal(_) => {
+                MsgType::ConnectedMrMsg(MsgCompareAtomicConnectedMr::from_ioc_mr_slice(
+                    &buf_iocs_mr,
+                    &mut buf_descs,
+                    &rma_iocs,
+                    CompareAtomicOp::CswapGe,
+                    0,
+                ))
+            }
+            MyEndpoint::Connectionless(_) => {
+                MsgType::ConnectionlessMsg(MsgCompareAtomic::from_ioc_slice(
+                    &buf_iocs,
+                    &mut buf_descs,
+                    mapped_addr.as_ref().unwrap(),
+                    &rma_iocs,
+                    CompareAtomicOp::CswapGe,
+                    0,
+                ))
+            }
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                MsgType::ConnectionlessMrMsg(MsgCompareAtomicMr::from_ioc_mr_slice(
+                    &buf_iocs_mr,
+                    &mut buf_descs,
+                    mapped_addr.as_ref().unwrap(),
+                    &rma_iocs,
+                    CompareAtomicOp::CswapGe,
+                    0,
+                ))
+            }
         };
 
-        ofi.compare_atomicmsg(
-            &msg,
-            &comp_iocs,
-            &mut res_iocs,
-            &mut comp_descs,
-            &mut res_descs,
-        );
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.compare_atomicmsg(
+                &msg,
+                &comp_iocs,
+                &mut res_iocs,
+                &mut comp_descs,
+                &mut res_descs,
+            ),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.compare_atomicmsg_mr(
+                &msg,
+                &comp_iocs_mr,
+                &mut res_iocs_mr,
+                &mut comp_descs,
+                &mut res_descs,
+            ),
+            MyEndpoint::Connectionless(_) => ofi.compare_atomicmsg(
+                &msg,
+                &comp_iocs,
+                &mut res_iocs,
+                &mut comp_descs,
+                &mut res_descs,
+            ),
+            MyEndpoint::ConnectionlessMrLocal(_) => ofi.compare_atomicmsg_mr(
+                &msg,
+                &comp_iocs_mr,
+                &mut res_iocs_mr,
+                &mut comp_descs,
+                &mut res_descs,
+            ),
+        }
+
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
         assert_eq!(res, &expected);
-
         // Send a done ack
-        ofi.send(&ack_mem[..512], &mut desc, None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&ack_mem[..512], &mut desc, None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&ack_mem_mr.slice(..512), &mut desc, None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&ack_mem[..512], &mut desc, None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&ack_mem_mr.slice(..512), &mut desc, None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
-
         // Recv a completion ack
-        ofi.recv(&mut ack_mem[..512], &mut desc);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut ack_mem[..512], &mut desc),
+            MyEndpoint::ConnectedMrLocal(_) => ofi.recv_mr(&mut ack_mem_mr.slice(..512), &mut desc),
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut ack_mem[..512], &mut desc),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut ack_mem_mr.slice(..512), &mut desc)
+            }
+        }
+
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
     } else {
         let expected = vec![2u8; 256];
 
         // Recv a completion ack
-        ofi.recv(&mut reg_mem[512..1024], &mut desc);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc)
+            }
+            MyEndpoint::Connectionless(_) => ofi.recv(&mut reg_mem[512..1024], &mut desc),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.recv_mr(&mut mr.slice(0).slice(512..1024), &mut desc)
+            }
+        }
+
         ofi.cq_type.rx_cq().sread(1, -1).unwrap();
         assert_eq!(&reg_mem[..256], &expected);
 
         // Send completion ack
-        ofi.send(&reg_mem[512..1024], &mut desc, None);
+        match &ofi.ep {
+            MyEndpoint::Connected(_) => ofi.send(&reg_mem[512..1024], &mut desc, None),
+            MyEndpoint::ConnectedMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut desc, None)
+            }
+            MyEndpoint::Connectionless(_) => ofi.send(&reg_mem[512..1024], &mut desc, None),
+            MyEndpoint::ConnectionlessMrLocal(_) => {
+                ofi.send_mr(&mr.slice(0).slice(512..1024), &mut desc, None)
+            }
+        }
         ofi.cq_type.tx_cq().sread(1, -1).unwrap();
     }
 }

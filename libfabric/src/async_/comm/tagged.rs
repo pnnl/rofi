@@ -7,8 +7,11 @@ use crate::conn_ep::ConnectedEp;
 use crate::connless_ep::ConnlessEp;
 use crate::ep::{Connected, Connectionless, EndpointImplBase, EpMrReq};
 use crate::infocapsoptions::{RecvMod, SendMod, TagCap};
-use crate::msg::{MsgTagged, MsgTaggedConnected, MsgTaggedConnectedMut, MsgTaggedMut};
-use crate::utils::Either;
+use crate::msg::{
+    MsgTagged, MsgTaggedConnected, MsgTaggedConnectedMr, MsgTaggedConnectedMut,
+    MsgTaggedConnectedMutMr, MsgTaggedMr, MsgTaggedMut, MsgTaggedMutMr,
+};
+use crate::utils::MsgType;
 use crate::{
     async_::{cq::AsyncReadCq, eq::AsyncReadEq, AsyncCtx},
     cq::SingleCompletion,
@@ -65,15 +68,19 @@ pub(crate) trait AsyncTagRecvEpImpl: AsyncRxEp + TagRecvEpImpl {
 
     async fn trecvmsg_async_impl<'a>(
         &self,
-        mut msg: Either<
+        mut msg: MsgType<
             &mut crate::msg::MsgTaggedMut<'a>,
             &mut crate::msg::MsgTaggedConnectedMut<'a>,
+            &mut crate::msg::MsgTaggedMutMr<'a>,
+            &mut crate::msg::MsgTaggedConnectedMutMr<'a>,
         >,
         options: TaggedRecvMsgOptions,
     ) -> Result<SingleCompletion, crate::error::Error> {
         let real_user_ctx = match msg {
-            Either::Left(ref mut msg) => msg.get_mut().context,
-            Either::Right(ref mut msg) => msg.get_mut().context,
+            MsgType::ConnectionlessMsg(ref mut msg) => msg.get_mut().context,
+            MsgType::ConnectedMsg(ref mut msg) => msg.get_mut().context,
+            MsgType::ConnectionlessMrMsg(ref mut msg) => msg.get_mut().context,
+            MsgType::ConnectedMrMsg(ref mut msg) => msg.get_mut().context,
         };
 
         let mut async_ctx = AsyncCtx {
@@ -85,20 +92,50 @@ pub(crate) trait AsyncTagRecvEpImpl: AsyncRxEp + TagRecvEpImpl {
         };
 
         let imm_msg = match msg {
-            Either::Left(ref mut msg) => {
+            MsgType::ConnectionlessMsg(ref mut msg) => {
                 msg.get_mut().context = (&mut async_ctx as *mut AsyncCtx).cast();
-                Either::<&MsgTaggedMut, &MsgTaggedConnectedMut>::Left(msg)
+                MsgType::<
+                    &MsgTaggedMut,
+                    &MsgTaggedConnectedMut,
+                    &MsgTaggedMutMr,
+                    &MsgTaggedConnectedMutMr,
+                >::ConnectionlessMsg(msg)
             }
-            Either::Right(ref mut msg) => {
+            MsgType::ConnectedMsg(ref mut msg) => {
                 msg.get_mut().context = (&mut async_ctx as *mut AsyncCtx).cast();
-                Either::<&MsgTaggedMut, &MsgTaggedConnectedMut>::Right(msg)
+                MsgType::<
+                    &MsgTaggedMut,
+                    &MsgTaggedConnectedMut,
+                    &MsgTaggedMutMr,
+                    &MsgTaggedConnectedMutMr,
+                >::ConnectedMsg(msg)
+            }
+            MsgType::ConnectionlessMrMsg(ref mut msg) => {
+                msg.get_mut().context = (&mut async_ctx as *mut AsyncCtx).cast();
+                MsgType::<
+                    &MsgTaggedMut,
+                    &MsgTaggedConnectedMut,
+                    &MsgTaggedMutMr,
+                    &MsgTaggedConnectedMutMr,
+                >::ConnectionlessMrMsg(msg)
+            }
+            MsgType::ConnectedMrMsg(ref mut msg) => {
+                msg.get_mut().context = (&mut async_ctx as *mut AsyncCtx).cast();
+                MsgType::<
+                    &MsgTaggedMut,
+                    &MsgTaggedConnectedMut,
+                    &MsgTaggedMutMr,
+                    &MsgTaggedConnectedMutMr,
+                >::ConnectedMrMsg(msg)
             }
         };
 
         if let Err(err) = self.trecvmsg_impl(imm_msg, options) {
             match msg {
-                Either::Left(ref mut msg) => msg.get_mut().context = real_user_ctx,
-                Either::Right(ref mut msg) => msg.get_mut().context = real_user_ctx,
+                MsgType::ConnectionlessMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
+                MsgType::ConnectedMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
+                MsgType::ConnectionlessMrMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
+                MsgType::ConnectedMrMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
             }
             return Err(err);
         }
@@ -106,8 +143,10 @@ pub(crate) trait AsyncTagRecvEpImpl: AsyncRxEp + TagRecvEpImpl {
         let cq = self.retrieve_rx_cq();
         let res = cq.wait_for_ctx_async(&mut async_ctx).await;
         match msg {
-            Either::Left(ref mut msg) => msg.get_mut().context = real_user_ctx,
-            Either::Right(ref mut msg) => msg.get_mut().context = real_user_ctx,
+            MsgType::ConnectionlessMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
+            MsgType::ConnectedMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
+            MsgType::ConnectionlessMrMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
+            MsgType::ConnectedMrMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
         }
         res
     }
@@ -281,7 +320,8 @@ impl<EP: AsyncTagRecvEpImpl> AsyncTagRecvEp for EP {
         msg: &mut crate::msg::MsgTaggedMut<'a>,
         options: TaggedRecvMsgOptions,
     ) -> Result<SingleCompletion, crate::error::Error> {
-        self.trecvmsg_async_impl(Either::Left(msg), options).await
+        self.trecvmsg_async_impl(MsgType::ConnectionlessMsg(msg), options)
+            .await
     }
 }
 
@@ -356,7 +396,8 @@ impl<EP: AsyncTagRecvEpImpl> ConnectedAsyncTagRecvEp for EP {
         msg: &mut crate::msg::MsgTaggedConnectedMut<'a>,
         options: TaggedRecvMsgOptions,
     ) -> Result<SingleCompletion, crate::error::Error> {
-        self.trecvmsg_async_impl(Either::Right(msg), options).await
+        self.trecvmsg_async_impl(MsgType::ConnectedMsg(msg), options)
+            .await
     }
 }
 
@@ -403,12 +444,19 @@ pub(crate) trait AsyncTagSendEpImpl: AsyncTxEp + TagSendEpImpl {
 
     async fn tsendmsg_async_impl<'a>(
         &self,
-        mut msg: Either<&mut crate::msg::MsgTagged<'a>, &mut crate::msg::MsgTaggedConnected<'a>>,
+        mut msg: MsgType<
+            &mut crate::msg::MsgTagged<'a>,
+            &mut crate::msg::MsgTaggedConnected<'a>,
+            &mut crate::msg::MsgTaggedMr<'a>,
+            &mut crate::msg::MsgTaggedConnectedMr<'a>,
+        >,
         options: TaggedSendMsgOptions,
     ) -> Result<SingleCompletion, crate::error::Error> {
         let real_user_ctx = match msg {
-            Either::Left(ref mut msg) => msg.get_mut().context,
-            Either::Right(ref mut msg) => msg.get_mut().context,
+            MsgType::ConnectionlessMsg(ref mut msg) => msg.get_mut().context,
+            MsgType::ConnectedMsg(ref mut msg) => msg.get_mut().context,
+            MsgType::ConnectionlessMrMsg(ref mut msg) => msg.get_mut().context,
+            MsgType::ConnectedMrMsg(ref mut msg) => msg.get_mut().context,
         };
         let mut async_ctx = AsyncCtx {
             user_ctx: if real_user_ctx.is_null() {
@@ -419,20 +467,30 @@ pub(crate) trait AsyncTagSendEpImpl: AsyncTxEp + TagSendEpImpl {
         };
 
         let imm_msg = match msg {
-            Either::Left(ref mut msg) => {
+            MsgType::ConnectionlessMsg(ref mut msg) => {
                 msg.get_mut().context = (&mut async_ctx as *mut AsyncCtx).cast();
-                Either::<&MsgTagged, &MsgTaggedConnected>::Left(msg)
+                MsgType::<&MsgTagged, &MsgTaggedConnected,&MsgTaggedMr, &MsgTaggedConnectedMr>::ConnectionlessMsg(msg)
             }
-            Either::Right(ref mut msg) => {
+            MsgType::ConnectedMsg(ref mut msg) => {
                 msg.get_mut().context = (&mut async_ctx as *mut AsyncCtx).cast();
-                Either::<&MsgTagged, &MsgTaggedConnected>::Right(msg)
+                MsgType::<&MsgTagged, &MsgTaggedConnected,&MsgTaggedMr, &MsgTaggedConnectedMr>::ConnectedMsg(msg)
+            }
+            MsgType::ConnectionlessMrMsg(ref mut msg) => {
+                msg.get_mut().context = (&mut async_ctx as *mut AsyncCtx).cast();
+                MsgType::<&MsgTagged, &MsgTaggedConnected,&MsgTaggedMr, &MsgTaggedConnectedMr>::ConnectionlessMrMsg(msg)
+            }
+            MsgType::ConnectedMrMsg(ref mut msg) => {
+                msg.get_mut().context = (&mut async_ctx as *mut AsyncCtx).cast();
+                MsgType::<&MsgTagged, &MsgTaggedConnected,&MsgTaggedMr, &MsgTaggedConnectedMr>::ConnectedMrMsg(msg)
             }
         };
 
         if let Err(err) = self.tsendmsg_impl(imm_msg, options) {
             match msg {
-                Either::Left(ref mut msg) => msg.get_mut().context = real_user_ctx,
-                Either::Right(ref mut msg) => msg.get_mut().context = real_user_ctx,
+                MsgType::ConnectionlessMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
+                MsgType::ConnectedMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
+                MsgType::ConnectionlessMrMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
+                MsgType::ConnectedMrMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
             }
             return Err(err);
         }
@@ -440,8 +498,10 @@ pub(crate) trait AsyncTagSendEpImpl: AsyncTxEp + TagSendEpImpl {
         let cq = self.retrieve_tx_cq();
         let res = cq.wait_for_ctx_async(&mut async_ctx).await;
         match msg {
-            Either::Left(ref mut msg) => msg.get_mut().context = real_user_ctx,
-            Either::Right(ref mut msg) => msg.get_mut().context = real_user_ctx,
+            MsgType::ConnectionlessMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
+            MsgType::ConnectedMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
+            MsgType::ConnectionlessMrMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
+            MsgType::ConnectedMrMsg(ref mut msg) => msg.get_mut().context = real_user_ctx,
         }
         res
     }
@@ -659,7 +719,8 @@ impl<EP: AsyncTagSendEpImpl + TagSendEpImpl + ConnlessEp> AsyncTagSendEp for EP 
         msg: &mut crate::msg::MsgTagged<'a>,
         options: TaggedSendMsgOptions,
     ) -> Result<SingleCompletion, crate::error::Error> {
-        self.tsendmsg_async_impl(Either::Left(msg), options).await
+        self.tsendmsg_async_impl(MsgType::ConnectionlessMsg(msg), options)
+            .await
     }
 
     #[inline]
@@ -749,7 +810,8 @@ impl<EP: AsyncTagSendEpImpl + ConnectedEp> ConnectedAsyncTagSendEp for EP {
         msg: &mut crate::msg::MsgTaggedConnected<'a>,
         options: TaggedSendMsgOptions,
     ) -> Result<SingleCompletion, crate::error::Error> {
-        self.tsendmsg_async_impl(Either::Right(msg), options).await
+        self.tsendmsg_async_impl(MsgType::ConnectedMsg(msg), options)
+            .await
     }
 
     #[inline]
