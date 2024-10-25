@@ -58,7 +58,7 @@ pub struct Ofi {
     pub my_pe: usize,
     mapped_addresses: Vec<libfabric::MappedAddress>,
     barrier_impl: BarrierImpl,
-    ep: libfabric::async_::ep::Endpoint<RmaAtomicCollEp>,
+    ep: libfabric::async_::connless_ep::ConnectionlessEndpoint<RmaAtomicCollEp>,
     cq: libfabric::async_::cq::CompletionQueue<CqOptDefault>,
     put_cntr: libfabric::cntr::Counter<CntrOptDefault>,
     get_cntr: libfabric::cntr::Counter<CntrOptDefault>,
@@ -152,7 +152,11 @@ impl Ofi {
         let put_cntr = libfabric::cntr::CounterBuilder::new().build(&domain)?;
         let get_cntr = libfabric::cntr::CounterBuilder::new().build(&domain)?; //
 
-        let ep = libfabric::async_::ep::EndpointBuilder::new(&info_entry).build(&domain)?;
+        let ep = match libfabric::async_::ep::EndpointBuilder::new(&info_entry).build(&domain)? {
+            libfabric::async_::ep::Endpoint::Connectionless(ep) => ep,
+            libfabric::async_::ep::Endpoint::ConnectionOriented(_) => todo!(), // Verbs is connectionless
+        };
+
         ep.bind_av(&av)?;
         ep.bind_cntr()
             .write()
@@ -168,7 +172,7 @@ impl Ofi {
 
         ep.bind_eq(&eq)?;
 
-        ep.enable()?;
+        let ep = ep.enable()?;
 
         let address = ep.getname()?;
         let address_bytes = address.as_bytes();

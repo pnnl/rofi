@@ -26,7 +26,7 @@ pub struct Ofi {
     pub my_pe: usize,
     mapped_addresses: Vec<libfabric::MappedAddress>,
     barrier_impl: BarrierImpl,
-    ep: libfabric::ep::Endpoint<RmaAtomicCollEp>,
+    ep: libfabric::connless_ep::ConnectionlessEndpoint<RmaAtomicCollEp>,
     cq: libfabric::cq::CompletionQueue<WaitableCq>,
     put_cntr: libfabric::cntr::Counter<WaitableCntr>,
     get_cntr: libfabric::cntr::Counter<WaitableCntr>,
@@ -121,6 +121,11 @@ impl Ofi {
         let get_cntr = libfabric::cntr::CounterBuilder::new().build(&domain)?; //
 
         let ep = libfabric::ep::EndpointBuilder::new(&info_entry).build(&domain)?;
+        let ep = match ep {
+            ep::Endpoint::Connectionless(ep) => ep, // Verbs is connectionless
+            ep::Endpoint::ConnectionOriented(_) => todo!(),
+        };
+
         ep.bind_av(&av)?;
         ep.bind_cntr()
             .write()
@@ -136,7 +141,7 @@ impl Ofi {
 
         ep.bind_eq(&eq)?;
 
-        ep.enable()?;
+        let ep = ep.enable()?;
 
         let address = ep.getname()?;
         let address_bytes = address.as_bytes();
@@ -467,7 +472,6 @@ impl Ofi {
     }
 
     pub fn sub_barrier(&self, pes: &[usize]) -> Result<(), libfabric::error::Error> {
-        println!("Running barrier");
         match &self.barrier_impl {
             BarrierImpl::Uninit => {
                 panic!("Barrier is not initialized");
@@ -557,12 +561,10 @@ impl Ofi {
         if sync {
             self.wait_for_tx_cntr(cntr_order)?;
         }        
-        println!("Done putting");
         Ok(())
     } 
 
     pub unsafe fn get<T>(&self, pe:usize, src_addr:usize, dst_addr: &mut [T], sync: bool) -> Result<(), libfabric::error::Error> {
-        println!("Getting from PE {}, addr: {}", pe, src_addr);
         let (offset, mut desc,  remote_alloc_info) = {
             let table = self.alloc_manager.mr_info_table.read();
             let alloc_info = table
@@ -592,7 +594,6 @@ impl Ofi {
             self.wait_for_rx_cntr(cntr_order)?;
         }
 
-        println!("Done getting from PE {}, addr: {}", pe, src_addr);
         Ok(())
     }
 
