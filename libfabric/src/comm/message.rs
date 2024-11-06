@@ -1,3 +1,5 @@
+use std::os::raw::c_void;
+
 use crate::{
     conn_ep::{ConnectedEp, ConnectedMrLocalEp},
     connless_ep::{ConnlessEp, ConnlessMrLocalEp},
@@ -7,7 +9,7 @@ use crate::{
     eq::ReadEq,
     fid::{AsRawTypedFid, EpRawFid},
     infocapsoptions::{MsgCap, RecvMod, SendMod},
-    mr::{DataDescriptor, MemoryRegionSlice},
+    mr::{DataDescriptor, MemoryRegion, MemoryRegionDesc, MemoryRegionSlice},
     trigger::TriggeredContext,
     utils::{check_error, MsgType},
     xcontext::{RxContextBase, RxContextImplBase, TxContextBase, TxContextImplBase},
@@ -41,21 +43,36 @@ pub(crate) fn extract_raw_addr_and_ctx(
     (raw_addr, ctx)
 }
 
+pub(crate) fn get_desc_or_null(desc: Option<&mut impl DataDescriptor>) -> *mut c_void{
+    match desc {
+        Some(desc) => desc.get_desc(),
+        None => std::ptr::null_mut(),
+    }
+}
+
+pub(crate) fn get_descs_or_null(desc: Option<&mut [impl DataDescriptor]>) -> *mut *mut c_void{
+    match desc {
+        Some(desc) => desc.as_mut_ptr().cast(),
+        None => std::ptr::null_mut(),
+    }
+}
+
 pub(crate) trait RecvEpImpl: AsRawTypedFid<Output = EpRawFid> {
     fn recv_impl<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
+        desc: Option<&mut impl DataDescriptor>,
         mapped_addr: Option<&crate::MappedAddress>,
         context: Option<*mut std::ffi::c_void>,
     ) -> Result<(), crate::error::Error> {
         let (raw_addr, ctx) = extract_raw_addr_and_ctx(mapped_addr, context);
+        
         let err = unsafe {
             libfabric_sys::inlined_fi_recv(
                 self.as_raw_typed_fid(),
                 buf.as_mut_ptr().cast(),
                 std::mem::size_of_val(buf),
-                desc.get_desc(),
+                get_desc_or_null(desc),
                 raw_addr,
                 ctx,
             )
@@ -66,7 +83,7 @@ pub(crate) trait RecvEpImpl: AsRawTypedFid<Output = EpRawFid> {
     fn recvv_impl(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
+        descs: Option<&mut [impl DataDescriptor]>,
         mapped_addr: Option<&crate::MappedAddress>,
         context: Option<*mut std::ffi::c_void>,
     ) -> Result<(), crate::error::Error> {
@@ -75,7 +92,7 @@ pub(crate) trait RecvEpImpl: AsRawTypedFid<Output = EpRawFid> {
             libfabric_sys::inlined_fi_recvv(
                 self.as_raw_typed_fid(),
                 iov.as_ptr().cast(),
-                desc.as_mut_ptr().cast(),
+                get_descs_or_null(descs),
                 iov.len(),
                 raw_addr,
                 ctx,
@@ -87,7 +104,7 @@ pub(crate) trait RecvEpImpl: AsRawTypedFid<Output = EpRawFid> {
     fn recvv_mr_impl(
         &self,
         iov: &[crate::iovec::IoVecMutMr],
-        desc: &mut [impl DataDescriptor],
+        descs: Option<&mut [impl DataDescriptor]>,
         mapped_addr: Option<&crate::MappedAddress>,
         context: Option<*mut std::ffi::c_void>,
     ) -> Result<(), crate::error::Error> {
@@ -96,7 +113,7 @@ pub(crate) trait RecvEpImpl: AsRawTypedFid<Output = EpRawFid> {
             libfabric_sys::inlined_fi_recvv(
                 self.as_raw_typed_fid(),
                 iov.as_ptr().cast(),
-                desc.as_mut_ptr().cast(),
+                get_descs_or_null(descs),
                 iov.len(),
                 raw_addr,
                 ctx,
@@ -133,35 +150,29 @@ pub trait ConnectedRecvEp {
     fn recv<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
     ) -> Result<(), crate::error::Error>;
     fn recv_with_context<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
         context: &mut Context,
     ) -> Result<(), crate::error::Error>;
     fn recv_triggered<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error>;
     fn recvv(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
     ) -> Result<(), crate::error::Error>;
-    fn recvv_with_context<T0>(
+    fn recvv_with_context(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
         context: &mut Context,
     ) -> Result<(), crate::error::Error>;
-    fn recvv_triggered<T0>(
+    fn recvv_triggered(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error>;
     fn recvmsg(
@@ -194,13 +205,13 @@ pub trait ConnectedRecvMrEp {
         iov: &[crate::iovec::IoVecMutMr],
         desc: &mut [impl DataDescriptor],
     ) -> Result<(), crate::error::Error>;
-    fn recvv_with_context<T0>(
+    fn recvv_with_context(
         &self,
         iov: &[crate::iovec::IoVecMutMr],
         desc: &mut [impl DataDescriptor],
         context: &mut Context,
     ) -> Result<(), crate::error::Error>;
-    fn recvv_triggered<T0>(
+    fn recvv_triggered(
         &self,
         iov: &[crate::iovec::IoVecMutMr],
         desc: &mut [impl DataDescriptor],
@@ -218,53 +229,47 @@ impl<EP: RecvEpImpl + ConnectedEp> ConnectedRecvEp for EP {
     fn recv<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
     ) -> Result<(), crate::error::Error> {
-        self.recv_impl::<T>(buf, desc, None, None)
+        self.recv_impl::<T>(buf, None::<&mut MemoryRegionDesc>, None, None)
     }
     #[inline]
     fn recv_with_context<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
         context: &mut Context,
     ) -> Result<(), crate::error::Error> {
-        self.recv_impl(buf, desc, None, Some(context.inner_mut()))
+        self.recv_impl(buf, None::<&mut MemoryRegionDesc>, None, Some(context.inner_mut()))
     }
     #[inline]
     fn recv_triggered<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error> {
-        self.recv_impl(buf, desc, None, Some(context.inner_mut()))
+        self.recv_impl(buf, None::<&mut MemoryRegionDesc>, None, Some(context.inner_mut()))
     }
     #[inline]
     fn recvv(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
     ) -> Result<(), crate::error::Error> {
-        self.recvv_impl(iov, desc, None, None)
+        self.recvv_impl(iov, None::<&mut [MemoryRegionDesc]>, None, None)
     }
     #[inline]
-    fn recvv_with_context<T0>(
+    fn recvv_with_context(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
         context: &mut Context,
     ) -> Result<(), crate::error::Error> {
-        self.recvv_impl(iov, desc, None, Some(context.inner_mut()))
+        self.recvv_impl(iov, None::<&mut [MemoryRegionDesc]>, None, Some(context.inner_mut()))
     }
     #[inline]
-    fn recvv_triggered<T0>(
+    fn recvv_triggered(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error> {
-        self.recvv_impl(iov, desc, None, Some(context.inner_mut()))
+        self.recvv_impl(iov, None::<&mut [MemoryRegionDesc]>, None, Some(context.inner_mut()))
     }
     #[inline]
     fn recvmsg(
@@ -286,7 +291,7 @@ impl<EP: RecvEpImpl + ConnectedMrLocalEp> ConnectedRecvMrEp for EP {
         let slice = unsafe {
             std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
         };
-        self.recv_impl::<T>(slice, desc, None, None)
+        self.recv_impl::<T>(slice, Some(desc), None, None)
     }
     #[inline]
     fn recv_with_context<T: Copy>(
@@ -298,7 +303,7 @@ impl<EP: RecvEpImpl + ConnectedMrLocalEp> ConnectedRecvMrEp for EP {
         let slice = unsafe {
             std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
         };
-        self.recv_impl(slice, desc, None, Some(context.inner_mut()))
+        self.recv_impl(slice, Some(desc), None, Some(context.inner_mut()))
     }
     #[inline]
     fn recv_triggered<T: Copy>(
@@ -310,7 +315,7 @@ impl<EP: RecvEpImpl + ConnectedMrLocalEp> ConnectedRecvMrEp for EP {
         let slice = unsafe {
             std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
         };
-        self.recv_impl(slice, desc, None, Some(context.inner_mut()))
+        self.recv_impl(slice, Some(desc), None, Some(context.inner_mut()))
     }
     #[inline]
     fn recvv(
@@ -318,25 +323,25 @@ impl<EP: RecvEpImpl + ConnectedMrLocalEp> ConnectedRecvMrEp for EP {
         iov: &[crate::iovec::IoVecMutMr],
         desc: &mut [impl DataDescriptor],
     ) -> Result<(), crate::error::Error> {
-        self.recvv_mr_impl(iov, desc, None, None)
+        self.recvv_mr_impl(iov, Some(desc), None, None)
     }
     #[inline]
-    fn recvv_with_context<T0>(
+    fn recvv_with_context(
         &self,
         iov: &[crate::iovec::IoVecMutMr],
         desc: &mut [impl DataDescriptor],
         context: &mut Context,
     ) -> Result<(), crate::error::Error> {
-        self.recvv_mr_impl(iov, desc, None, Some(context.inner_mut()))
+        self.recvv_mr_impl(iov, Some(desc), None, Some(context.inner_mut()))
     }
     #[inline]
-    fn recvv_triggered<T0>(
+    fn recvv_triggered(
         &self,
         iov: &[crate::iovec::IoVecMutMr],
         desc: &mut [impl DataDescriptor],
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error> {
-        self.recvv_mr_impl(iov, desc, None, Some(context.inner_mut()))
+        self.recvv_mr_impl(iov, Some(desc), None, Some(context.inner_mut()))
     }
     #[inline]
     fn recvmsg(
@@ -352,75 +357,63 @@ pub trait RecvEp {
     fn recv_from<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
         mapped_addr: &crate::MappedAddress,
     ) -> Result<(), crate::error::Error>;
     fn recv_from_with_context<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
         mapped_addr: &crate::MappedAddress,
         context: &mut Context,
     ) -> Result<(), crate::error::Error>;
     fn recv_from_triggered<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
         mapped_addr: &crate::MappedAddress,
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error>;
     fn recvv_from(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
         mapped_addr: &crate::MappedAddress,
     ) -> Result<(), crate::error::Error>;
-    fn recvv_from_with_context<T0>(
+    fn recvv_from_with_context(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
         mapped_addr: &crate::MappedAddress,
         context: &mut Context,
     ) -> Result<(), crate::error::Error>;
-    fn recvv_from_triggered<T0>(
+    fn recvv_from_triggered(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
         mapped_addr: &crate::MappedAddress,
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error>;
     fn recv_from_any<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
     ) -> Result<(), crate::error::Error>;
     fn recv_from_any_with_context<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
         context: &mut Context,
     ) -> Result<(), crate::error::Error>;
     fn recvv_from_any(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
     ) -> Result<(), crate::error::Error>;
-    fn recvv_from_any_with_context<T0>(
+    fn recvv_from_any_with_context(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
         context: &mut Context,
     ) -> Result<(), crate::error::Error>;
     fn recv_from_any_triggered<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error>;
-    fn recvv_from_any_triggered<T0>(
+    fn recvv_from_any_triggered(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error>;
     fn recvmsg_from(
@@ -517,122 +510,110 @@ impl<EP: RecvEpImpl + ConnlessEp> RecvEp for EP {
     fn recv_from_any<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
     ) -> Result<(), crate::error::Error> {
-        self.recv_impl::<T>(buf, desc, None, None)
+        self.recv_impl::<T>(buf, None::<&mut MemoryRegionDesc>, None, None)
     }
 
     #[inline]
     fn recv_from_any_with_context<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
         context: &mut Context,
     ) -> Result<(), crate::error::Error> {
-        self.recv_impl(buf, desc, None, Some(context.inner_mut()))
+        self.recv_impl(buf, None::<&mut MemoryRegionDesc>, None, Some(context.inner_mut()))
     }
 
     #[inline]
     fn recv_from<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
         mapped_addr: &crate::MappedAddress,
     ) -> Result<(), crate::error::Error> {
-        self.recv_impl::<T>(buf, desc, Some(mapped_addr), None)
+        self.recv_impl::<T>(buf, None::<&mut MemoryRegionDesc>, Some(mapped_addr), None)
     }
 
     #[inline]
     fn recv_from_with_context<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
         mapped_addr: &crate::MappedAddress,
         context: &mut Context,
     ) -> Result<(), crate::error::Error> {
-        self.recv_impl(buf, desc, Some(mapped_addr), Some(context.inner_mut()))
+        self.recv_impl(buf, None::<&mut MemoryRegionDesc>, Some(mapped_addr), Some(context.inner_mut()))
     }
 
     #[inline]
     fn recv_from_triggered<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
         mapped_addr: &crate::MappedAddress,
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error> {
-        self.recv_impl(buf, desc, Some(mapped_addr), Some(context.inner_mut()))
+        self.recv_impl(buf, None::<&mut MemoryRegionDesc>, Some(mapped_addr), Some(context.inner_mut()))
     }
 
     #[inline]
     fn recvv_from(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
         mapped_addr: &crate::MappedAddress,
     ) -> Result<(), crate::error::Error> {
-        self.recvv_impl(iov, desc, Some(mapped_addr), None)
+        self.recvv_impl(iov, None::<&mut [MemoryRegionDesc]>, Some(mapped_addr), None)
     }
 
     #[inline]
-    fn recvv_from_with_context<T0>(
+    fn recvv_from_with_context(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
         mapped_addr: &crate::MappedAddress,
         context: &mut Context,
     ) -> Result<(), crate::error::Error> {
-        self.recvv_impl(iov, desc, Some(mapped_addr), Some(context.inner_mut()))
+        self.recvv_impl(iov, None::<&mut [MemoryRegionDesc]>, Some(mapped_addr), Some(context.inner_mut()))
     }
 
     #[inline]
-    fn recvv_from_triggered<T0>(
+    fn recvv_from_triggered(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
         mapped_addr: &crate::MappedAddress,
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error> {
-        self.recvv_impl(iov, desc, Some(mapped_addr), Some(context.inner_mut()))
+        self.recvv_impl(iov, None::<&mut [MemoryRegionDesc]>, Some(mapped_addr), Some(context.inner_mut()))
     }
 
     #[inline]
     fn recv_from_any_triggered<T>(
         &self,
         buf: &mut [T],
-        desc: &mut impl DataDescriptor,
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error> {
-        self.recv_impl(buf, desc, None, Some(context.inner_mut()))
+        self.recv_impl(buf, None::<&mut MemoryRegionDesc>, None, Some(context.inner_mut()))
     }
 
     #[inline]
     fn recvv_from_any(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
     ) -> Result<(), crate::error::Error> {
-        self.recvv_impl(iov, desc, None, None)
+        self.recvv_impl(iov, None::<&mut [MemoryRegionDesc]>, None, None)
     }
 
     #[inline]
-    fn recvv_from_any_with_context<T0>(
+    fn recvv_from_any_with_context(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
         context: &mut Context,
     ) -> Result<(), crate::error::Error> {
-        self.recvv_impl(iov, desc, None, Some(context.inner_mut()))
+        self.recvv_impl(iov, None::<&mut [MemoryRegionDesc]>, None, Some(context.inner_mut()))
     }
 
     #[inline]
-    fn recvv_from_any_triggered<T0>(
+    fn recvv_from_any_triggered(
         &self,
         iov: &[crate::iovec::IoVecMut],
-        desc: &mut [impl DataDescriptor],
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error> {
-        self.recvv_impl(iov, desc, None, Some(context.inner_mut()))
+        self.recvv_impl(iov, None::<&mut [MemoryRegionDesc]>, None, Some(context.inner_mut()))
     }
 
     #[inline]
@@ -655,7 +636,7 @@ impl<EP: RecvEpImpl + ConnlessMrLocalEp> RecvMrEp for EP {
         let slice = unsafe {
             std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
         };
-        self.recv_impl::<T>(slice, desc, None, None)
+        self.recv_impl::<T>(slice, Some(desc), None, None)
     }
 
     #[inline]
@@ -668,7 +649,7 @@ impl<EP: RecvEpImpl + ConnlessMrLocalEp> RecvMrEp for EP {
         let slice = unsafe {
             std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
         };
-        self.recv_impl(slice, desc, None, Some(context.inner_mut()))
+        self.recv_impl(slice, Some(desc), None, Some(context.inner_mut()))
     }
 
     #[inline]
@@ -681,7 +662,7 @@ impl<EP: RecvEpImpl + ConnlessMrLocalEp> RecvMrEp for EP {
         let slice = unsafe {
             std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
         };
-        self.recv_impl::<T>(slice, desc, Some(mapped_addr), None)
+        self.recv_impl::<T>(slice, Some(desc), Some(mapped_addr), None)
     }
 
     #[inline]
@@ -695,7 +676,7 @@ impl<EP: RecvEpImpl + ConnlessMrLocalEp> RecvMrEp for EP {
         let slice = unsafe {
             std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
         };
-        self.recv_impl(slice, desc, Some(mapped_addr), Some(context.inner_mut()))
+        self.recv_impl(slice, Some(desc), Some(mapped_addr), Some(context.inner_mut()))
     }
 
     #[inline]
@@ -709,7 +690,7 @@ impl<EP: RecvEpImpl + ConnlessMrLocalEp> RecvMrEp for EP {
         let slice = unsafe {
             std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
         };
-        self.recv_impl(slice, desc, Some(mapped_addr), Some(context.inner_mut()))
+        self.recv_impl(slice, Some(desc), Some(mapped_addr), Some(context.inner_mut()))
     }
 
     #[inline]
@@ -719,7 +700,7 @@ impl<EP: RecvEpImpl + ConnlessMrLocalEp> RecvMrEp for EP {
         desc: &mut [impl DataDescriptor],
         mapped_addr: &crate::MappedAddress,
     ) -> Result<(), crate::error::Error> {
-        self.recvv_mr_impl(iov, desc, Some(mapped_addr), None)
+        self.recvv_mr_impl(iov, Some(desc), Some(mapped_addr), None)
     }
 
     #[inline]
@@ -730,7 +711,7 @@ impl<EP: RecvEpImpl + ConnlessMrLocalEp> RecvMrEp for EP {
         mapped_addr: &crate::MappedAddress,
         context: &mut Context,
     ) -> Result<(), crate::error::Error> {
-        self.recvv_mr_impl(iov, desc, Some(mapped_addr), Some(context.inner_mut()))
+        self.recvv_mr_impl(iov, Some(desc), Some(mapped_addr), Some(context.inner_mut()))
     }
 
     #[inline]
@@ -741,7 +722,7 @@ impl<EP: RecvEpImpl + ConnlessMrLocalEp> RecvMrEp for EP {
         mapped_addr: &crate::MappedAddress,
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error> {
-        self.recvv_mr_impl(iov, desc, Some(mapped_addr), Some(context.inner_mut()))
+        self.recvv_mr_impl(iov, Some(desc), Some(mapped_addr), Some(context.inner_mut()))
     }
 
     #[inline]
@@ -754,7 +735,7 @@ impl<EP: RecvEpImpl + ConnlessMrLocalEp> RecvMrEp for EP {
         let slice = unsafe {
             std::slice::from_raw_parts_mut(buf.start as *mut T, buf.len / std::mem::size_of::<T>())
         };
-        self.recv_impl(slice, desc, None, Some(context.inner_mut()))
+        self.recv_impl(slice, Some(desc), None, Some(context.inner_mut()))
     }
 
     #[inline]
@@ -763,7 +744,7 @@ impl<EP: RecvEpImpl + ConnlessMrLocalEp> RecvMrEp for EP {
         iov: &[crate::iovec::IoVecMutMr],
         desc: &mut [impl DataDescriptor],
     ) -> Result<(), crate::error::Error> {
-        self.recvv_mr_impl(iov, desc, None, None)
+        self.recvv_mr_impl(iov, Some(desc), None, None)
     }
 
     #[inline]
@@ -773,7 +754,7 @@ impl<EP: RecvEpImpl + ConnlessMrLocalEp> RecvMrEp for EP {
         desc: &mut [impl DataDescriptor],
         context: &mut Context,
     ) -> Result<(), crate::error::Error> {
-        self.recvv_mr_impl(iov, desc, None, Some(context.inner_mut()))
+        self.recvv_mr_impl(iov, Some(desc), None, Some(context.inner_mut()))
     }
 
     #[inline]
@@ -783,7 +764,7 @@ impl<EP: RecvEpImpl + ConnlessMrLocalEp> RecvMrEp for EP {
         desc: &mut [impl DataDescriptor],
         context: &mut TriggeredContext,
     ) -> Result<(), crate::error::Error> {
-        self.recvv_mr_impl(iov, desc, None, Some(context.inner_mut()))
+        self.recvv_mr_impl(iov, Some(desc), None, Some(context.inner_mut()))
     }
 
     #[inline]

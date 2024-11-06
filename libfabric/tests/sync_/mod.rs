@@ -1646,11 +1646,9 @@ pub fn msg_post_recv<M: MsgDefaultCap, T: TagDefaultCap>(
                             "receive",
                             ep,
                             base,
-                            mr_desc,
                             ctx
                         );
                     } else {
-                        let mr_desc = &mut default_desc();
                         ft_post!(
                             recv_with_context,
                             ft_progress,
@@ -1660,7 +1658,6 @@ pub fn msg_post_recv<M: MsgDefaultCap, T: TagDefaultCap>(
                             "receive",
                             ep,
                             base,
-                            mr_desc,
                             ctx
                         );
                     }
@@ -1685,12 +1682,10 @@ pub fn msg_post_recv<M: MsgDefaultCap, T: TagDefaultCap>(
                                 "receive",
                                 ep,
                                 base,
-                                mr_desc,
                                 fi_address,
                                 ctx
                             );
                         } else {
-                            let mr_desc = &mut default_desc();
                             ft_post!(
                                 recv_from_with_context,
                                 ft_progress,
@@ -1700,7 +1695,6 @@ pub fn msg_post_recv<M: MsgDefaultCap, T: TagDefaultCap>(
                                 "receive",
                                 ep,
                                 base,
-                                mr_desc,
                                 fi_address,
                                 ctx
                             );
@@ -1716,11 +1710,9 @@ pub fn msg_post_recv<M: MsgDefaultCap, T: TagDefaultCap>(
                                 "receive",
                                 ep,
                                 base,
-                                mr_desc,
                                 ctx
                             );
                         } else {
-                            let mr_desc = &mut default_desc();
                             ft_post!(
                                 recv_from_any_with_context,
                                 ft_progress,
@@ -1730,7 +1722,6 @@ pub fn msg_post_recv<M: MsgDefaultCap, T: TagDefaultCap>(
                                 "receive",
                                 ep,
                                 base,
-                                mr_desc,
                                 ctx
                             );
                         }
@@ -1830,7 +1821,6 @@ pub fn connected_tagged_post<E: TagDefaultCap>(
                     "transmit",
                     ep,
                     base,
-                    desc,
                     data,
                     op_tag,
                     ctx
@@ -1845,7 +1835,6 @@ pub fn connected_tagged_post<E: TagDefaultCap>(
                     "transmit",
                     ep,
                     base,
-                    desc,
                     op_tag,
                     ctx
                 );
@@ -1926,7 +1915,6 @@ pub fn conless_tagged_post<E: TagDefaultCap>(
                     "transmit",
                     ep,
                     base,
-                    desc,
                     data,
                     fi_address,
                     op_tag,
@@ -1942,7 +1930,6 @@ pub fn conless_tagged_post<E: TagDefaultCap>(
                     "transmit",
                     ep,
                     base,
-                    desc,
                     fi_address,
                     op_tag,
                     ctx
@@ -2002,7 +1989,6 @@ pub fn connected_tagged_post_recv<T: TagDefaultCap>(
                 "receive",
                 ep,
                 base,
-                desc,
                 op_tag,
                 zero,
                 ctx
@@ -2046,7 +2032,6 @@ pub fn connless_tagged_post_recv<T: TagDefaultCap>(
                 "receive",
                 ep,
                 base,
-                desc,
                 fi_address,
                 op_tag,
                 zero,
