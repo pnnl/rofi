@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <rdma/fi_atomic.h>
 
 #include <rofi.h>
 #include <rofi_atomic.h>
@@ -16,7 +17,51 @@
 
 rofi_transport_t rofi;
 
-uint32_t rofi_atomic_fetch_add_internal(uint32_t *addr, uint32_t value, unsigned int id) {
+/*
+ssize_t fi_fetch_atomic(struct fid_ep *ep, const void *buf,
+    size_t count, void *desc, void *result, void *result_desc,
+    fi_addr_t dest_addr, uint64_t addr, uint64_t key,
+    enum fi_datatype datatype, enum fi_op op, void *context);
+*/
+
+
+uint32_t rofi_atomic_fetch_add_internal(void *addr, uint32_t value, unsigned int id) {
+    uint32_t old_val;
+    rofi_mr_desc *el = mr_get(&rofi, addr);
+    struct fi_rma_iov rma_iov;
+
+    if (!el) {
+        ERR_MSG("MR not found for address %p", addr);
+        return -1;
+    }
+    
+    for (int i = 0; i < rofi.desc.nodes; i++) {
+        DEBUG_MSG("remote addr: %d %p 0x%lx", i, el->iov[i].addr, el->iov[i].key);
+    }
+
+    rma_iov.addr = (uint64_t)(addr - el->start + el->iov[id].addr);
+    if(rma_iov.addr == 0) {
+        ERR_MSG("\t No address found for address %p on node %u", addr, id);
+        return -1;
+    }
+    rma_iov.key = el->iov[id].key;
+    if (rma_iov.key == 0) {
+        ERR_MSG("\t No Key found for address %p on node %u", addr, id);
+        return -1;
+    }
+
+    DEBUG_MSG("\t Adding %lu to address 0x%lx at node %u with key 0x%lx",
+              value, rma_iov.addr, id, rma_iov.key);
+
+    ssize_t ret = fi_fetch_atomic(rofi.ep, (const void*) &value, NULL, 1, (void*) &old_val, NULL,
+                                  rofi.remote_addrs[id], rma_iov.addr, rma_iov.key,
+                                  FI_UINT32, FI_SUM, NULL);
+
+    if(ret){
+        ERR_MSG("Error in atomic fetch add %p %d %u", addr, value, id);
+        return ret;
+    }
+
     return 0;
 }
 

@@ -27,10 +27,18 @@ int main(void) {
     }
     rofi_barrier();
 
-    rofi_atomic_fetch_add(ptr, 1, 0);
+    if(id) {
+        ret = rofi_atomic_fetch_add(ptr, 1, 0);
+        if (ret) {
+            printf("Error in atomic fetch add %p %d %u (%d)\n", ptr, 1, id, ret);
+            return -1;
+        }
+    }
 
+    rofi_barrier();
     if(id == 0) {
-        rofi_verify(*ptr == 1);
+        printf("ID: %u/%u, ptr: %p, value: %u\n", id, size, ptr, *ptr);
+        rofi_verify(*ptr == size-1);
     }
     
     rofi_release(ptr); 
