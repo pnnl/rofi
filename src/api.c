@@ -500,3 +500,8 @@ void *rofi_get_local_addr_from_remote_addr(void *addr, unsigned int id) {
     DEBUG_MSG("Translating address %p on node %lu...", addr, id);
     return rofi_get_local_addr_from_remote_addr_internal(addr, id);
 }
+
+int32_t rofi_atomic_fetch_add(uint32_t* addr, uint32_t value, unsigned int id) {
+    DEBUG_MSG("Atomic fetch add %p %d %u", addr, value, id);
+    return rofi_atomic_fetch_add_internal(addr, value, id);
+}

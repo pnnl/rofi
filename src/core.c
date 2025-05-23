@@ -16,6 +16,11 @@
 
 rofi_transport_t rofi;
 
+uint32_t rofi_atomic_fetch_add_internal(uint32_t *addr, uint32_t value, unsigned int id) {
+    return 0;
+}
+
+
 void *rofi_get_remote_addr_internal(void *addr, unsigned int id) {
     rofi_mr_desc *el = mr_get(&rofi, addr);
     int ret = 0;
