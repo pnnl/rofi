@@ -238,6 +238,19 @@ int rofi_transport_init(struct fi_info *hints, rofi_transport_t *rofi, rofi_name
         return -1;
     }
 
+    DEBUG_MSG("rofi->info: %p, provider: %s, caps: 0x%lx\n",
+       rofi->info, rofi->info->fabric_attr->prov_name, rofi->info->caps);
+    
+    DEBUG_MSG("Selected provider: %s\n", rofi->info->fabric_attr->prov_name);
+    DEBUG_MSG("Selected caps: 0x%lx\n", rofi->info->caps);
+
+    if(rofi->info->caps & FI_ATOMIC) {
+        DEBUG_MSG("Selected atomic: yes");
+    }
+    else {
+        DEBUG_MSG("Selected atomic: no");
+    }   
+
     ret = rofi_transport_init_fabric_resources(rofi);
     if (ret) {
         // already would have printed the error.
@@ -298,7 +311,7 @@ int rofi_transport_init(struct fi_info *hints, rofi_transport_t *rofi, rofi_name
 }
 
 int rofi_transport_init_fabric_resources(rofi_transport_t *rofi) {
-    DEBUG_MSG("FI_FABRIC");
+   // DEBUG_MSG("FI_FABRIC");
     int ret = fi_fabric(rofi->info->fabric_attr, &rofi->fabric, NULL);
     if (ret) {
         ROFI_TRANSPORT_ERR_MSG("fi_fabric", ret);
@@ -307,14 +320,14 @@ int rofi_transport_init_fabric_resources(rofi_transport_t *rofi) {
 
     struct fi_eq_attr eq_attr = {0};
     eq_attr.wait_obj = FI_WAIT_UNSPEC;
-    DEBUG_MSG("FI_EQ_OPEN");
+   // DEBUG_MSG("FI_EQ_OPEN");
     ret = fi_eq_open(rofi->fabric, &eq_attr, &rofi->eq, NULL);
     if (ret) {
         ROFI_TRANSPORT_ERR_MSG("fi_eq_open", ret);
         return ret;
     }
 
-    DEBUG_MSG("FI_DOMAIN");
+   // DEBUG_MSG("FI_DOMAIN");
     ret = fi_domain(rofi->fabric, rofi->info, &rofi->domain, NULL);
     if (ret) {
         ROFI_TRANSPORT_ERR_MSG("fi_domain", ret);
@@ -323,6 +336,7 @@ int rofi_transport_init_fabric_resources(rofi_transport_t *rofi) {
 
     return 0;
 }
+
 int rofi_transport_init_endpoint_resources(rofi_transport_t *rofi) {
     struct fi_cntr_attr put_cntr_attr = {0};
     struct fi_cntr_attr get_cntr_attr = {0};
@@ -337,28 +351,28 @@ int rofi_transport_init_endpoint_resources(rofi_transport_t *rofi) {
     send_cntr_attr.wait_obj = FI_WAIT_UNSPEC;
     recv_cntr_attr.wait_obj = FI_WAIT_UNSPEC;
 
-    DEBUG_MSG("put FI_CNTR_OPEN");
+    //DEBUG_MSG("put FI_CNTR_OPEN");
     int ret = fi_cntr_open(rofi->domain, &put_cntr_attr, &rofi->put_cntr, NULL);
     if (ret) {
         ROFI_TRANSPORT_ERR_MSG("fi_cntr_open", ret);
         return ret;
     }
 
-    DEBUG_MSG("get FI_CNTR_OPEN");
+    //DEBUG_MSG("get FI_CNTR_OPEN");
     ret = fi_cntr_open(rofi->domain, &get_cntr_attr, &rofi->get_cntr, NULL);
     if (ret) {
         ROFI_TRANSPORT_ERR_MSG("fi_cntr_open", ret);
         return ret;
     }
 
-    DEBUG_MSG("send FI_CNTR_OPEN");
+    //DEBUG_MSG("send FI_CNTR_OPEN");
     ret = fi_cntr_open(rofi->domain, &send_cntr_attr, &rofi->send_cntr, NULL);
     if (ret) {
         ROFI_TRANSPORT_ERR_MSG("fi_cntr_open", ret);
         return ret;
     }
 
-    DEBUG_MSG("recv FI_CNTR_OPEN");
+    //DEBUG_MSG("recv FI_CNTR_OPEN");
     ret = fi_cntr_open(rofi->domain, &recv_cntr_attr, &rofi->recv_cntr, NULL);
     if (ret) {
         ROFI_TRANSPORT_ERR_MSG("fi_cntr_open", ret);
@@ -369,7 +383,7 @@ int rofi_transport_init_endpoint_resources(rofi_transport_t *rofi) {
     cq_attr.format = FI_CQ_FORMAT_CONTEXT;
     cq_attr.wait_obj = FI_WAIT_UNSPEC;
 
-    DEBUG_MSG("FI_CQ_OPEN");
+   // DEBUG_MSG("FI_CQ_OPEN");
     ret = fi_cq_open(rofi->domain, &cq_attr, &rofi->cq, NULL);
     if (ret) {
         ROFI_TRANSPORT_ERR_MSG("fi_cq_open", ret);
@@ -381,7 +395,7 @@ int rofi_transport_init_endpoint_resources(rofi_transport_t *rofi) {
         av_attr.type = rofi->info->domain_attr->av_type;
     }
 
-    DEBUG_MSG("FI_AV_OPEN");
+   // DEBUG_MSG("FI_AV_OPEN");
     ret = fi_av_open(rofi->domain, &av_attr, &rofi->av, NULL);
     if (ret) {
         ROFI_TRANSPORT_ERR_MSG("fi_av_open", ret);
@@ -389,7 +403,7 @@ int rofi_transport_init_endpoint_resources(rofi_transport_t *rofi) {
     }
 
     rofi->info->ep_attr->tx_ctx_cnt = 0;
-    rofi->info->caps = FI_RMA | FI_WRITE | FI_READ | FI_REMOTE_WRITE | FI_REMOTE_READ | rofi->fi_collective;
+    rofi->info->caps = FI_RMA | FI_WRITE | FI_READ | FI_REMOTE_WRITE | FI_ATOMIC | FI_REMOTE_READ | rofi->fi_collective;
     rofi->info->tx_attr->op_flags = FI_DELIVERY_COMPLETE; // FI_TRANSMIT_COMPLETE fails, FI_DELIVERY_COMPLETE works but I dont see a difference?
     rofi->info->mode = 0;
     rofi->info->tx_attr->mode = 0;
@@ -398,6 +412,9 @@ int rofi_transport_init_endpoint_resources(rofi_transport_t *rofi) {
     rofi->info->tx_attr->size = 1024;
     rofi->info->tx_attr->caps = rofi->info->caps;
     rofi->info->rx_attr->caps = FI_RECV | rofi->fi_collective; // to drive progress
+
+    DEBUG_MSG("rofi->info: %p, provider: %s, caps: 0x%lx\n",
+       rofi->info, rofi->info->fabric_attr->prov_name, rofi->info->caps);
 
     DEBUG_MSG("FI_ENDPOINT");
     ret = fi_endpoint(rofi->domain, rofi->info, &rofi->ep, NULL);
