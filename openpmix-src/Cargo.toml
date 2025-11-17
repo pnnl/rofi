@@ -1,15 +1,9 @@
 [package]
-name = "pmix-sys"
+name = "openpmix-src"
 version = "0.1.0"
-edition = "2021"
-links = "pmix"
-build = "build.rs"
+edition = "2024"
 
 [dependencies]
 hwlocality-sys = {version = "0.6.1", features = ["hwloc-latest", "vendored"]}
 libevent-sys = {version="0.3", features = ["bundled", "openssl_bundled", "threading"]}
-
-
-[build-dependencies]
-openpmix-src = {version="*", path="/people/thom895/rofi/openpmix-src"}
-bindgen = "0.72.1"
+autotools = "0.2"

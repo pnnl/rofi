@@ -10,3 +10,9 @@
 [submodule "prrte-sys/prrte"]
 	path = prrte-sys/prrte
 	url = https://github.com/openpmix/prrte.git
+[submodule "openpmix-src/openpmix"]
+	path = openpmix-src/openpmix
+	url = https://github.com/openpmix/openpmix.git
+[submodule "prrte-src/prrte"]
+	path = prrte-src/prrte
+	url = https://github.com/openpmix/prrte.git
