@@ -122,12 +122,3 @@ pub fn generate_wrapper_proto_and_body(func_proto: &str) -> (String, String) {
 
     (wrapper_proto, wrapper_impl)
 }
-
-// fn main() {
-
-//     let inlined_funcs = read_file("target/release/build/libfabrics-sys-58d2aac918303fbf/out/libfabric/build/include/rdma/fi_atomic.h");
-//     println!("Found {} inlined functions\n", inlined_funcs.0.len());
-//     for f in std::iter::zip(inlined_funcs.0, inlined_funcs.1) {
-//         println!("{}\n{}", f.0, f.1);
-//     }
-// }
