@@ -10,6 +10,3 @@
 [submodule "libfabric-src/libfabric"]
 	path = libfabric-src/libfabric
 	url = https://github.com/ofiwg/libfabric.git
-[submodule "pmix-sys/openpmix"]
-	path = pmix-sys/openpmix
-	url = https://github.com/openpmix/openpmix.git
