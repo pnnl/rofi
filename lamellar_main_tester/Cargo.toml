@@ -1,0 +1,9 @@
+[package]
+name = "lamellar_main_tester"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lamellar_main = {version = "*", path = "/qfs/people/thom895/rofi/lamellar_main", features = ["use-srun"]}
+prrte-sys = {version = "0.1", path = "/qfs/people/thom895/rofi/prrte-sys"}
+pmi = {version = "*", path="/qfs/people/thom895/rofi/pmi/", features = ["with-pmi1"]}
