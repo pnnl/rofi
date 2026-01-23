@@ -1,9 +1,0 @@
-[package]
-name = "lamellar_main_tester"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-lamellar_main = {version = "*", path = "../lamellar_main", features = ["use-srun"]}
-prrte-sys = {version = "0.1", path = "../prrte-sys"}
-pmi = {version = "*", path="../pmi/", features = ["with-pmi1"]}
