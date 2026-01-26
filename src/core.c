@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <inttypes.h>
+#include <math.h>
 #include <rdma/fi_rma.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,365 +14,244 @@
 #include <rofi_internal.h>
 #include <transport.h>
 
-uint32_t version = FI_VERSION(1, 0);
-rofi_desc_t rdesc;
-
-struct fi_info *info = NULL;
-struct fid_fabric *ofi_ffid = NULL;
-struct fid_domain *ofi_dfid = NULL;
-struct fid_av *ofi_avfid = NULL;
-struct fid_ep *ofi_epfid = NULL;
-struct fid_cntr *ofi_ctfid = NULL;
-struct fid_cq *ofi_cqfid = NULL;
-struct fid_mr *ofi_mrfd_heap = NULL;
-struct fid_mr *ofi_mrfd_data = NULL;
-struct fid_stx *ofi_stxfid = NULL;
-
-void *ofi_heap_base = NULL;
-unsigned long ofi_heap_length = 0;
-unsigned long ofi_heap_status = ROFI_HEAP_NOTALLOCATED;
-
-ofi_ctx_t ofi_ctx;
-
-fi_addr_t *remote_fi_addrs = NULL;
-struct fi_rma_iov *remote_iov = NULL;
-;
-
-extern struct fid_mr *mr;
-
-#define GET_DEST(dest) ((fi_addr_t)(addr_table[(dest)]))
-
-int ft_init_fabric(void);
-int ft_finalize(void);
-void ft_free_res(void);
+rofi_transport_t rofi;
 
 void *rofi_get_remote_addr_internal(void *addr, unsigned int id) {
-    rofi_mr_desc *el = mr_get(addr);
+    rofi_mr_desc *el = mr_get(&rofi, addr);
     int ret = 0;
 
-    if (!el)
+    if (!el) {
+        ERR_MSG("MR not found for address %p", addr);
         return NULL;
+    }
 
-    DEBUG_MSG("\t Found MR [0x%lx - 0x%lx] Key: 0x%lx %p", el->start, el->start + el->size, el->mr_key, (void *)(addr - (uintptr_t)el->start + el->iov[id].addr));
-    // printf("\t Found MR [0x%lx - 0x%lx] Key: 0x%lx iov: 0x%lx %p 0x%lx %p \n", el->start, el->start + el->size, el->mr_key, el->iov[id].addr,addr,(void*) (addr - el->iov[id].addr +  (uintptr_t)el->start),(void*) (addr - (uintptr_t)el->start + el->iov[id].addr));
-    // return (void*) (addr - el->iov[id].addr +  (uintptr_t)el->start);
+    DEBUG_MSG("\t Found MR [0x%lx - 0x%lx] Addr: %p Key: 0x%lx ", el->start, el->start + el->size, (void *)(addr - (uintptr_t)el->start + el->iov[id].addr), el->iov[id].key);
     return (void *)(addr - (uintptr_t)el->start + el->iov[id].addr);
 }
 
 void *rofi_get_local_addr_from_remote_addr_internal(void *addr, unsigned int id) {
-    rofi_mr_desc *el = mr_get_from_remote(addr, id);
+    rofi_mr_desc *el = mr_get_from_remote(&rofi, addr, id);
     int ret = 0;
 
-    if (!el)
+    if (!el) {
+        ERR_MSG("MR not found for remote address %p", addr);
         return NULL;
+    }
 
-    DEBUG_MSG("\t Found MR [0x%lx - 0x%lx] Key: 0x%lx", el->start, el->start + el->size, el->mr_key);
-    // if (el->size <= 4096) {
-    // 	printf("\t Found MR [0x%lx - 0x%lx] Key: 0x%lx remote_start 0x%lx offset 0x%lx len %lx local %lx\n", el->start, el->start + el->size, el->mr_key,el->iov[id].addr,addr - el->iov[id].addr, el->size,(addr - el->iov[id].addr +  (uintptr_t)el->start));
-    // }
+    DEBUG_MSG("\t Found MR [0x%lx - 0x%lx] Addr: %p Key: 0x%lx", el->start, el->start + el->size, (void *)(addr - el->iov[id].addr + (uintptr_t)el->start), el->iov[id].key);
     return (void *)(addr - el->iov[id].addr + (uintptr_t)el->start);
 }
 
 int rofi_wait_internal(void) {
-    int ret = 0;
-    uint64_t key;
-    struct fi_cq_entry cqe;
-
-    while (1) {
-        ret = fi_cq_read(ofi_ctx.cq, &cqe, 1);
-        if (ret > 0) {
-            DEBUG_MSG("\tfi_cq_read Returned %d completion evetns.", ret);
-            return 0;
-        }
-
-        if (ret != -FI_EAGAIN) {
-            struct fi_cq_err_entry cqe_err;
-            fi_cq_readerr(ofi_ctx.cq, &cqe_err, 0);
-            ERR_MSG("\t%s %s", fi_strerror(cqe_err.err),
-                    fi_cq_strerror(ofi_ctx.cq, cqe_err.prov_errno, cqe_err.err_data,
-                                   NULL, 0));
-            return ret;
-        }
-    }
-
-    rdesc.tx_cntr = 0;
-    rdesc.rx_cntr = 0;
+    rofi_transport_put_wait_all(&rofi);
+    rofi_transport_get_wait_all(&rofi);
+    // rofi_transport_barrier(&rofi);
+    return 0;
 }
 
 void *rofi_alloc_internal(size_t size, unsigned long flags) {
-    rofi_mr_desc *el;
-    int ret = 0;
 
-    el = mr_add(size, flags);
-    if (!el)
+    rofi_mr_desc *mr = mr_add(&rofi, size, flags);
+    if (!mr) {
+        ERR_MSG("Error allocating memory for memory region descriptor. Aborting!");
         return NULL;
+    }
 
-    ret = ft_exchange_keys(el->iov, el->fid, el->start);
-    if (ret)
+    if (rofi_transport_exchange_mr_info(&rofi, mr)) {
+        ERR_MSG("Error exchanging memory region info. Aborting!");
         return NULL;
+    }
 
-#ifdef _DEBUG
-    for (int i = 0; i < rdesc.nodes; i++)
-        DEBUG_MSG("\t Node: %o Key: 0x%lx Addr: 0x%lx", i, el->iov[i].key, el->iov[i].addr);
-#endif
-    // for(int i=0; i< rdesc.nodes; i++)
-    // 	printf("\t Node: %o Key: 0x%lx Addr: 0x%lx size: %lu\n", i, el->iov[i].key, el->iov[i].addr,size);
-    // printf("\n");
-
-    return el->start;
+    return mr->start;
 }
 
 void *rofi_sub_alloc_internal(size_t size, unsigned long flags, uint64_t *pes, uint64_t num_pes) {
-    rofi_mr_desc *el;
-    int ret = 0;
-
-    el = mr_add(size, flags);
-    if (!el)
+    rofi_mr_desc *mr = mr_add(&rofi, size, flags);
+    if (!mr) {
+        ERR_MSG("Error allocating memory for memory region descriptor. Aborting!");
         return NULL;
-#ifdef _DEBUG
-    for (int i = 0; i < rdesc.nodes; i++)
-        DEBUG_MSG("\t Node: %o Key: 0x%lx Addr: 0x%lx", i, el->iov[i].key, el->iov[i].addr);
-#endif
+    }
 
-    ret = ft_exchange_keys_sub(el->iov, el->fid, el->start, pes, num_pes);
-    if (ret)
+    if (rofi_transport_sub_exchange_mr_info(&rofi, mr, pes, num_pes)) {
+        ERR_MSG("Error exchanging memory region info. Aborting!");
         return NULL;
+    }
 
-#ifdef _DEBUG
-    for (int i = 0; i < rdesc.nodes; i++)
-        DEBUG_MSG("\t Node: %o Key: 0x%lx Addr: 0x%lx", i, el->iov[i].key, el->iov[i].addr);
-#endif
-    return el->start;
+    return mr->start;
 }
 
 int rofi_release_internal(void *addr) {
-    return mr_rm(addr);
-    ;
+    return mr_rm(&rofi, addr);
 }
 
 int rofi_sub_release_internal(void *addr, uint64_t *pes, uint64_t num_pes) {
-    return mr_rm(addr);
-    ;
+    return mr_rm(&rofi, addr);
 }
 
 unsigned int rofi_get_size_internal(void) {
-    return rdesc.nodes;
+    return rofi.desc.nodes;
 }
 
 unsigned int rofi_get_id_internal(void) {
-    return rdesc.nid;
+    return rofi.desc.nid;
+}
+
+// NOTE this is needed to ensure progress for something like n-way dissemination barriers
+// as recipients of RDMA Put still need to proress their completion queues for others to continue
+int rofi_flush_internal(void) {
+    // DEBUG_MSG("\t Flushing...");
+    pthread_mutex_lock(&rofi.lock);
+    rofi_transport_progress(&rofi);
+    pthread_mutex_unlock(&rofi.lock);
+    return 0;
+}
+
+void rofi_barrier_internal(void) {
+    rofi_transport_barrier(&rofi);
 }
 
 int rofi_put_internal(void *dst, void *src, size_t size, unsigned int id, unsigned long flags) {
-    rofi_mr_desc *el = mr_get(dst);
+    rofi_mr_desc *el = mr_get(&rofi, dst);
     struct fi_rma_iov rma_iov;
     int ret = 0;
 
-#if 0
-	if(rdesc.prov == shm && rdesc.tx_cntr >= FI_SHM_TX_SIZE)
-		return EAGAIN;
-#endif
-
-    if (!fi_tx_size_left(ep))
-        return EAGAIN;
-
-    if (!el)
-        goto err;
-
-    DEBUG_MSG("\t Found MR [0x%p - 0x%p] Key: 0x%lx", el->start, el->start + el->size, el->mr_key);
-
-    if ((fi->domain_attr->mr_mode == FI_MR_BASIC) ||
-        (fi->domain_attr->mr_mode & FI_MR_VIRT_ADDR)) {
-        rma_iov.addr = (uint64_t)(dst - el->start + el->iov[id].addr);
+    if (!el) {
+        ERR_MSG("\t No mr found for address %p on node %u", dst, id);
+        return -1;
     }
-    else {
-        rma_iov.addr = 0;
+    DEBUG_MSG("\t Found MR [0x%p - 0x%p] Key: 0x%lx for dst address %p", el->start, el->start + el->size, el->mr_key, dst);
+
+    for (int i = 0; i < rofi.desc.nodes; i++) {
+        DEBUG_MSG("remote addr: %d %p", i, el->iov[id].addr);
     }
+
+    rma_iov.addr = (uint64_t)(dst - el->start + el->iov[id].addr);
     rma_iov.key = el->iov[id].key;
-    DEBUG_MSG("\t Writing %lu bytes from %p to address 0x%lx at node %u with key 0x%lx (threshold %lu, in-flight msgs: %lu)",
-              size, src, rma_iov.addr, id, rma_iov.key, fi->tx_attr->inject_size,
-              rdesc.tx_cntr);
-    // printf("\t Writing %lu bytes from %p to address 0x%lx at node %u with key 0x%lx (threshold %lu, in-flight msgs: %lu\n)",
-    //               size, src, rma_iov.addr, id, rma_iov.key, fi->tx_attr->inject_size,
-    //               rdesc.tx_cntr);
+    if (rma_iov.key == 0) {
+        ERR_MSG("\t No Key found for address %p on node %u", dst, id);
+        return -1;
+    }
+    DEBUG_MSG("\t Writing %lu bytes from %p to address 0x%lx at node %u with key 0x%lx (threshold %lu, in-flight msgs: %lu) sync: %d",
+              size, src, rma_iov.addr, id, rma_iov.key, rofi.desc.inject_size,
+              rofi.put_cntr,
+              flags & ROFI_SYNC);
 
-    if (size < fi->tx_attr->inject_size) {
-        DEBUG_MSG("\t Using RMA Inject");
-        ainc(&rdesc.tx_cntr);
-        ret = ft_post_rma_inject(FT_RMA_WRITE, ep, size, &rma_iov, src, id);
-        adec(&rdesc.tx_cntr);
+    if (flags & ROFI_SYNC) {
+        if (rofi_transport_put(&rofi, &rma_iov, id, src, size, el->mr_desc, NULL)) {
+            ERR_MSG("\t Error writing %lu bytes from %p to address 0x%lx at node %u with key 0x%lx",
+                    size, src, rma_iov.addr, id, rma_iov.key);
+            return -1;
+        }
+        if (rofi_transport_put_wait_all(&rofi)) {
+            ERR_MSG("\t Error waiting for put");
+            return -1;
+        }
     }
     else {
-        struct fi_context2 *ctx = NULL;
-        unsigned long txid = 0;
-        ainc(&rdesc.tx_cntr);
-
-        DEBUG_MSG("\t Using RMA POST");
-
-        if (flags & ROFI_SYNC) {
-            ctx = (struct fi_context2 *)malloc(sizeof(struct fi_context2));
-            if (!ctx) {
-                ERR_MSG("Error allocating context for transmission.");
-                goto err;
-            }
-        }
-        else {
-            txid = ctx_new();
-            if (!txid) {
-                ERR_MSG("Error allocating context for new transaction.");
-                goto err;
-            }
-
-            ctx = ctx_get(txid);
-        }
-
-        ret = ft_post_rma(FT_RMA_WRITE, ep, size, &rma_iov, src, id, el->mr_desc,
-                          &ctx);
-        /*
-         * There is no immediate way in libfabrics to wait for a single transaction,
-         * unless different event queues are used. We need to wait for all previous
-         * transaction _and_ this one to be sure that all data has been transferred.
-         */
-        if (flags & ROFI_SYNC) {
-            ctx_get_lock();
-            ret = ft_get_tx_comp(tx_seq);
-            ctx_cleanup();
-            ctx_release_lock();
-            free(ctx);
-            adec(&rdesc.tx_cntr);
+        if (rofi_transport_put(&rofi, &rma_iov, id, src, size, el->mr_desc, NULL)) {
+            ERR_MSG("\t Error writing %lu bytes from %p to address 0x%lx at node %u with key 0x%lx",
+                    size, src, rma_iov.addr, id, rma_iov.key);
+            return -1;
         }
     }
-
-    return ret;
-
-err:
-    return -1;
+    DEBUG_MSG("\t Done writing %lu bytes from %p to address 0x%lx at node %u with key 0x%lx",
+              size, src, rma_iov.addr, id, rma_iov.key);
+    return 0;
 }
 
 int rofi_get_internal(void *dst, void *src, size_t size, unsigned int id, unsigned long flags) {
-    rofi_mr_desc *el = mr_get(src);
+    rofi_mr_desc *el = mr_get(&rofi, src);
     struct fi_rma_iov rma_iov;
     int ret = 0;
-    struct fi_context2 *ctx = NULL;
-    unsigned long txid = 0;
 
-#if 0
-	if(rdesc.prov == shm && rdesc.rx_cntr >= FI_SHM_TX_SIZE)
-		return EAGAIN;
-#endif
-
-    if (!fi_rx_size_left(ep))
-        return EAGAIN;
-
-    if (!el)
-        goto err;
-
-    DEBUG_MSG("\t Found MR [%p - %p] Key: 0x%lx", el->start, el->start + el->size, el->mr_key);
-
-    if ((fi->domain_attr->mr_mode == FI_MR_BASIC) ||
-        (fi->domain_attr->mr_mode & FI_MR_VIRT_ADDR)) {
-        rma_iov.addr = (uint64_t)(src - el->start + el->iov[id].addr);
+    if (!el) {
+        ERR_MSG("\t No mr found for address %p on node %u", src, id);
+        return -1;
     }
-    else {
-        rma_iov.addr = 0;
-    }
+    DEBUG_MSG("\t Found MR [0x%p - 0x%p] Key: 0x%lx", el->start, el->start + el->size, el->mr_key);
+
+    rma_iov.addr = (uint64_t)(src - el->start + el->iov[id].addr);
     rma_iov.key = el->iov[id].key;
-    DEBUG_MSG("\t Reading %lu bytes (into %p) from address 0x%lx at node %u with key 0x%lx (threshold %lu in-flight msgs: %lu)",
-              size, dst, rma_iov.addr, id, rma_iov.key, fi->tx_attr->inject_size, rdesc.rx_cntr);
+    if (rma_iov.key == 0) {
+        ERR_MSG("\t No Key found for address %p on node %u", src, id);
+        return -1;
+    }
+    DEBUG_MSG("\t Reading %lu bytes from address 0x%lx to %p at node %u with key 0x%lx (threshold %lu, in-flight msgs: %lu) sync: %d",
+              size, rma_iov.addr, dst, id, rma_iov.key, rofi.desc.max_message_size,
+              rofi.get_cntr,
+              flags & ROFI_SYNC);
 
     if (flags & ROFI_SYNC) {
-        ctx = (struct fi_context2 *)malloc(sizeof(struct fi_context2));
-        if (!ctx) {
-            ERR_MSG("Error allocating context for transmission.");
-            goto err;
+
+        if (rofi_transport_get(&rofi, &rma_iov, id, dst, size, el->mr_desc, NULL)) {
+            ERR_MSG("\t Error reading %lu bytes from address 0x%lx to %p at node %u with key 0x%lx",
+                    size, rma_iov.addr, src, id, rma_iov.key);
+            return -1;
+        }
+        if (rofi_transport_get_wait_all(&rofi)) {
+            ERR_MSG("\t Error waiting for get");
         }
     }
     else {
-        txid = ctx_new();
-        if (!txid) {
-            ERR_MSG("Error allocating context for new transaction.");
-            goto err;
+        if (rofi_transport_get(&rofi, &rma_iov, id, dst, size, el->mr_desc, NULL)) {
+            ERR_MSG("\t Error reading %lu bytes from address 0x%lx to %p at node %u with key 0x%lx",
+                    size, rma_iov.addr, src, id, rma_iov.key);
+            return -1;
         }
-
-        ctx = ctx_get(txid);
     }
-
-    ainc(&rdesc.rx_cntr);
-    ret = ft_post_rma(FT_RMA_READ, ep, size, &rma_iov, dst, id, el->mr_desc,
-                      ctx);
-
-    assert(ret == 0);
-
-    /*
-     * There is no immediate way in libfabrics to wait for a single transaction,
-     * unless different event queues are used. We need to wait for all previous
-     * transaction _and_ this one to be sure that all data has been transferred.
-     */
-    if (flags & ROFI_SYNC) {
-        ctx_get_lock();
-        ret = ft_get_tx_comp(tx_seq);
-        ctx_cleanup();
-        ctx_release_lock();
-        free(ctx);
-        adec(&rdesc.rx_cntr);
-    }
-
-    return ret;
-
-err:
-    return -1;
-}
-
-int rofi_send_internal(unsigned long id, void *buf, size_t size, unsigned long flags) {
-    int ret = 0;
-
-#if 0
-	if(rdesc.prov == shm && rdesc.tx_cntr >= FI_SHM_TX_SIZE)
-		return EAGAIN;
-#endif
-
-    if (!fi_tx_size_left(ep))
-        return EAGAIN;
-
-    memcpy((void *)(tx_buf + ft_tx_prefix_size()), buf, size);
-    if (size < fi->tx_attr->inject_size)
-        ret = ft_inject(ep, remote_fi_addrs[id], size);
-    else
-        ret = ft_tx(ep, remote_fi_addrs[id], size, &tx_ctx);
-    if (ret)
-        return ret;
-
+    DEBUG_MSG("\t Done reading %lu bytes from address 0x%lx to %p at node %u with key 0x%lx",
+              size, rma_iov.addr, dst, id, rma_iov.key);
     return 0;
 }
 
-int rofi_recv_internal(unsigned long id, void *buf, size_t size, unsigned long flags) {
-    int ret = 0;
-
-#if 0
-	if(rdesc.prov == shm && rdesc.rx_cntr >= FI_SHM_TX_SIZE)
-		return EAGAIN;
-#endif
-
-    if (!fi_rx_size_left(ep))
-        return EAGAIN;
-
-    ret = ft_rx(ep, size);
-    if (ret)
-        return ret;
-    memcpy(buf, (void *)rx_buf + ft_tx_prefix_size(), size);
-
+int rofi_send_internal(unsigned int pe, void *buf, size_t size, unsigned long flags) {
+    if (rofi_transport_send(&rofi, buf, size, pe)) {
+        ERR_MSG("\t Error sending %lu bytes to node %u", size, pe);
+        return -1;
+    }
     return 0;
 }
 
-int rofi_init_internal(char *prov) {
-    int ret = 0;
+int rofi_recv_internal(void *buf, size_t size, unsigned long flags) {
+    if (rofi_transport_recv(&rofi, buf, size)) {
+        ERR_MSG("\t Error receiving %lu bytes", size);
+        return -1;
+    }
+    return 0;
+}
 
-    opts = INIT_OPTS;
-    opts.options |= FT_OPT_BW;
-    ofi_heap_status = ROFI_HEAP_NOTALLOCATED;
-    rdesc.PageSize = sysconf(_SC_PAGESIZE);
-    rdesc.tx_cntr = 0;
-    rdesc.rx_cntr = 0;
+rofi_names_t *rofi_parse_names_internal(char *names_list) {
+    char token = ';';
+    int name_cnt = 0;
+    for (int i = 0; i < strlen(names_list); i++) {
+        if (names_list[i] == token) {
+            name_cnt++;
+        }
+    }
+    name_cnt += 1;
+    char **name_strs = (char **)calloc(name_cnt, sizeof(char *));
+
+    int p = 0;
+    int i = 0;
+    for (int k = 0; k < strlen(names_list); k++) {
+        if (names_list[k] == token) {
+            name_strs[p] = strndup(&names_list[i], k - i);
+            p++;
+            i = k + 1;
+        }
+    }
+    name_strs[p] = strndup(&names_list[i], strlen(names_list) - i);
+    rofi_names_t *names = (rofi_names_t *)calloc(1, sizeof(rofi_names_t));
+    names->num = name_cnt;
+    names->names = name_strs;
+    return names;
+}
+
+int rofi_init_internal(char *provs, char *domains) {
+    pthread_rwlock_init(&rofi.mr_lock, NULL);
+    pthread_mutex_init(&rofi.lock, NULL);
+    int ret = 0;
+    rofi.desc.PageSize = sysconf(_SC_PAGESIZE);
 
     ret = rt_init();
     if (ret) {
@@ -379,76 +259,121 @@ int rofi_init_internal(char *prov) {
         goto err;
     }
 
-    rdesc.nodes = rt_get_size();
-    rdesc.nid = rt_get_rank();
+    rofi.desc.nodes = rt_get_size();
+    rofi.desc.nid = rt_get_rank();
 
-    DEBUG_MSG("Initializing process %d/%d...", rdesc.nid, rdesc.nodes);
+    rofi.info = NULL;
 
-    hints = fi_allocinfo();
-    if (!hints)
+    DEBUG_MSG("Initializing process %d/%d...", rofi.desc.nid, rofi.desc.nodes);
+
+    struct fi_info *hints = fi_allocinfo();
+    if (!hints) {
         return EXIT_FAILURE;
-
-    hints->caps = FI_MSG | FI_RMA;
-    hints->domain_attr->resource_mgmt = FI_RM_ENABLED;
-    hints->mode = FI_CONTEXT;
-    hints->domain_attr->threading = FI_THREAD_DOMAIN;
-    hints->domain_attr->mr_mode = opts.mr_mode;
-
-    if (!hints->fabric_attr) {
-        hints->fabric_attr = malloc(sizeof *(hints->fabric_attr));
-        if (!hints->fabric_attr) {
-            perror("malloc");
-            exit(EXIT_FAILURE);
-        }
     }
-    if (prov)
-        hints->fabric_attr->prov_name = strdup(prov);
+
+    hints->caps = FI_RMA | FI_ATOMIC | FI_COLLECTIVE | FI_MSG;
+    hints->addr_format = FI_FORMAT_UNSPEC;
+    hints->domain_attr->resource_mgmt = FI_RM_ENABLED;
+    hints->domain_attr->threading = FI_THREAD_DOMAIN;
+    hints->domain_attr->data_progress = FI_PROGRESS_MANUAL;
+    hints->domain_attr->mr_mode = FI_MR_BASIC; // FI_MR_ALLOCATED | FI_MR_PROV_KEY | FI_MR_VIRT_ADDR; //we do FI_MR_BASIC because tcp will clear the individual flags thus would require us to make our mr offsets 0-based
+    hints->mode = FI_CONTEXT;
     hints->ep_attr->type = FI_EP_RDM;
-    remote_fi_addrs = (fi_addr_t *)malloc(rdesc.nodes * sizeof(fi_addr_t));
-    if (!remote_fi_addrs) {
+    hints->tx_attr->op_flags = FI_DELIVERY_COMPLETE; // maybe need to change this to FI_INJECT_COMPLETE or FI_TRANSMIT_COMPLETE
+
+    rofi_names_t *prov_names = NULL;
+    if (provs) {
+        prov_names = rofi_parse_names_internal(provs);
+    }
+
+    rofi_names_t *domain_names = NULL;
+    if (domains) {
+        domain_names = rofi_parse_names_internal(domains);
+    }
+
+    // I think the endpoints we support are all connected so I'm not sure these are even used?
+    rofi.remote_addrs = (fi_addr_t *)malloc(rofi.desc.nodes * sizeof(fi_addr_t));
+    if (!rofi.remote_addrs) {
         ERR_MSG("Error allocating memory for remote addresses. Aborting!");
         return -ENOMEM;
     }
 
-    for (int i = 0; i < rdesc.nodes; i++)
-        remote_fi_addrs[i] = FI_ADDR_UNSPEC;
+    for (int i = 0; i < rofi.desc.nodes; i++) {
+        rofi.remote_addrs[i] = i;
+    }
 
-    remote_iov = (struct fi_rma_iov *)malloc(rdesc.nodes * sizeof(struct fi_rma_iov));
-    if (!remote_iov) {
-        ERR_MSG("Error allocating memory for remote memory region keys. Aborting!");
+    rofi_transport_init(hints, &rofi, prov_names, domain_names);
+
+    if (prov_names) {
+        for (int i = 0; i < prov_names->num; i++) {
+            free(prov_names->names[i]);
+        }
+        free(prov_names->names);
+        free(prov_names);
+    }
+
+    if (domain_names) {
+        for (int i = 0; i < domain_names->num; i++) {
+            free(domain_names->names[i]);
+        }
+        free(domain_names->names);
+        free(domain_names);
+    }
+
+    mr_init();
+    uint64_t global_barrier_size = rofi.desc.nodes * sizeof(uint64_t);
+    uint64_t sub_alloc_barrier_size = rofi.desc.nodes * sizeof(uint64_t);
+    uint64_t sub_alloc_size = rofi.desc.nodes * sizeof(struct fi_rma_iov);
+    int rofi_mr_size = global_barrier_size + sub_alloc_barrier_size + sub_alloc_size;
+
+    rofi.mr = mr_add(&rofi, rofi_mr_size, 0);
+    if (!rofi.mr) {
+        ERR_MSG("Error allocating memory for memory region alloc buffer. Aborting!");
         return -ENOMEM;
     }
 
-    ft_init_fabric();
-    ret = ft_exchange_keys(remote_iov, mr, rx_buf + ft_rx_prefix_size());
-    if (ret)
+    ret = rofi_transport_exchange_mr_info(&rofi, rofi.mr);
+
+    if (ret) {
         return ret;
+    }
 
-    mr_init();
+    rofi.global_barrier_id = 0;
+    rofi.global_barrier_buf = (uint64_t *)rofi.mr->start;
+    rofi.sub_alloc_barrier_buf = (uint64_t *)(rofi.mr->start + global_barrier_size);
+    rofi.sub_alloc_buf = (struct fi_rma_iov *)(rofi.mr->start + global_barrier_size + sub_alloc_barrier_size);
 
+    for (int i = 0; i < rofi.desc.nid; i++) {
+        rofi.global_barrier_buf[i] = 0;
+        rofi.sub_alloc_barrier_buf[i] = 0;
+        rofi.sub_alloc_buf[i].key = 0;
+        rofi.sub_alloc_buf[i].addr = 0;
+    }
+    fi_freeinfo(hints);
+    rofi_transport_barrier(&rofi);
     return 0;
 
 err:
-    rdesc.status = ROFI_STATUS_ERR;
+    rofi.desc.status = ROFI_STATUS_ERR;
     return -1;
 }
 
-/*
- * Unmap symmetric heap after OFU transport is down to ensure nobody accidentally writes
- * to an unmapped heap.
- */
 int rofi_finit_internal(void) {
-    rdesc.status = ROFI_STATUS_TERM;
-    // if (rdesc.nodes > 1) {
-    //     rt_barrier();
-    // }
-    ft_finalize();
-    mr_free();
+    DEBUG_MSG("rofi_finit_internal");
+    rofi.desc.status = ROFI_STATUS_TERM;
+    rofi_wait_internal();
+    pthread_mutex_lock(&rofi.lock);
+    rofi_transport_progress(&rofi);
+    pthread_mutex_unlock(&rofi.lock);
 
-    ft_free_res();
-    // if (rdesc.nodes > 1) {
-    //     rt_barrier();
-    // }
+    if (rofi.desc.nodes > 1) {
+        rt_barrier();
+    }
+    mr_free(&rofi);
+
+    pthread_mutex_lock(&rofi.lock);
+    rofi_transport_fini(&rofi);
+    pthread_mutex_unlock(&rofi.lock);
 
     return 0;
 }
