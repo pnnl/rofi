@@ -1,7 +1,9 @@
 #ifndef ROFI_INTERNAL_H
 #define ROFI_INTERNAL_H
 
+
 #include <pthread.h>
+#include <stdatomic.h>
 
 #include <pthread.h>
 #include <rdma/fabric.h>
@@ -73,10 +75,10 @@ struct rofi_transport_t {
     struct fid_cntr *recv_cntr;
     struct fid_cq *cq;
     fi_addr_t *remote_addrs;
-    uint64_t pending_put_cntr;
-    uint64_t pending_get_cntr;
-    uint64_t pending_send_cntr;
-    uint64_t pending_recv_cntr;
+    _Atomic uint64_t pending_put_cntr;
+    _Atomic uint64_t pending_get_cntr;
+    _Atomic uint64_t pending_send_cntr;
+    _Atomic uint64_t pending_recv_cntr;
     uint64_t error_cnt;
     rofi_desc_t desc;
     rofi_mr_desc *mr;

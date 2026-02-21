@@ -69,7 +69,7 @@ int rofi_transport_init_av(rofi_transport_t *rofi);
 int rofi_transport_progress(rofi_transport_t *rofi);
 int rofi_transport_ctx_check_err(rofi_transport_t *rofi, int err);
 int rofi_transport_check_rma_err(rofi_transport_t *rofi, int ret);
-int rofi_transport_wait_on_cntr(rofi_transport_t *rofi, uint64_t *pending_cntr, struct fid_cntr *cntr);
+int rofi_transport_wait_on_cntr(rofi_transport_t *rofi, _Atomic uint64_t *pending_cntr, struct fid_cntr *cntr);
 int rofi_transport_wait_on_context_comp(rofi_transport_t *rofi, void *context);
 int rofi_transport_wait_on_event(rofi_transport_t *rofi, uint32_t event, void *context);
 

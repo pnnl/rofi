@@ -52,6 +52,28 @@
 #include "rofi_internal.h"
 #include "transport.h"
 
+static inline void atomic_max_u64(_Atomic uint64_t *p, uint64_t v) {
+    uint64_t old = atomic_load_explicit(p, memory_order_relaxed);
+    while (old < v) {
+        if (atomic_compare_exchange_weak_explicit(p, &old, v, memory_order_relaxed, memory_order_relaxed)) {
+            break;
+        }
+        // old updated by compare_exchange
+    }
+}
+
+static inline void atomic_max_with_inc(_Atomic uint64_t *p, uint64_t min_after_inc) {
+    uint64_t old = atomic_load_explicit(p, memory_order_relaxed);
+    while (true) {
+        uint64_t desired = old + 1;
+        if (desired < min_after_inc) desired = min_after_inc;
+        if (atomic_compare_exchange_weak_explicit(p, &old, desired, memory_order_relaxed, memory_order_relaxed)) {
+            break;
+        }
+        // old updated, loop
+    }
+}
+
 int rofi_transport_fini(rofi_transport_t *rofi) {
     DEBUG_MSG("Fini");
 
@@ -661,8 +683,8 @@ int rofi_transport_check_rma_err(rofi_transport_t *rofi, int err) {
     return 0;
 }
 
-int rofi_transport_locked_wait_on_cntr(rofi_transport_t *rofi, uint64_t *pending_cntr, struct fid_cntr *cntr) {
-    uint64_t cnt = *pending_cntr;
+int rofi_transport_locked_wait_on_cntr(rofi_transport_t *rofi, _Atomic uint64_t *pending_cntr, struct fid_cntr *cntr) {
+    uint64_t cnt = atomic_load_explicit(pending_cntr, memory_order_relaxed);
     uint64_t orig_cnt = cnt;
     uint64_t prev_cnt = cnt;
     uint64_t cur_cnt = fi_cntr_read(cntr);
@@ -674,7 +696,7 @@ int rofi_transport_locked_wait_on_cntr(rofi_transport_t *rofi, uint64_t *pending
         old_cnt = cur_cnt;
         int ret = fi_cntr_wait(cntr, prev_cnt, 100);
         cur_cnt = fi_cntr_read(cntr);
-        cnt = *pending_cntr; // this could be updated by another thread
+        cnt = atomic_load_explicit(pending_cntr, memory_order_relaxed); // this could be updated by another thread
         if (ret != -FI_ETIMEDOUT){
             ret = rofi_transport_progress(rofi);
             if (ret) {
@@ -685,13 +707,13 @@ int rofi_transport_locked_wait_on_cntr(rofi_transport_t *rofi, uint64_t *pending
         }
         
     } while (cnt < cur_cnt || prev_cnt < cnt || cur_cnt != old_cnt);
-    DEBUG_MSG("Done Waiting for  %lu  prev_cnt: %lu gets to complete... cnt: %lu err_cnt: %lu", *pending_cntr, prev_cnt, cnt, err_cnt);
+    DEBUG_MSG("Done Waiting for  %lu  prev_cnt: %lu gets to complete... cnt: %lu err_cnt: %lu", atomic_load_explicit(pending_cntr, memory_order_relaxed), prev_cnt, cnt, err_cnt);
     assert(prev_cnt <= cnt);
     return 0;
 }
 
-int rofi_transport_wait_on_cntr(rofi_transport_t *rofi, uint64_t *pending_cntr, struct fid_cntr *cntr) {
-    uint64_t cnt = *pending_cntr;
+int rofi_transport_wait_on_cntr(rofi_transport_t *rofi, _Atomic uint64_t *pending_cntr, struct fid_cntr *cntr) {
+    uint64_t cnt = atomic_load_explicit(pending_cntr, memory_order_relaxed);
     uint64_t prev_cnt = cnt;
     pthread_mutex_lock(&rofi->lock);
     uint64_t cur_cnt = fi_cntr_read(cntr);
@@ -704,7 +726,7 @@ int rofi_transport_wait_on_cntr(rofi_transport_t *rofi, uint64_t *pending_cntr, 
         old_cnt = cur_cnt;
         pthread_mutex_lock(&rofi->lock);
         int ret = rofi_transport_progress(rofi);
-        ret = fi_cntr_wait(cntr, prev_cnt, 100);
+        ret = fi_cntr_wait(cntr, prev_cnt, -1);
         
         cur_cnt = fi_cntr_read(cntr);
         if (ret != -FI_ETIMEDOUT){
@@ -717,7 +739,7 @@ int rofi_transport_wait_on_cntr(rofi_transport_t *rofi, uint64_t *pending_cntr, 
         }
        
         pthread_mutex_unlock(&rofi->lock);
-        cnt = *pending_cntr; // this could be updated by another thread
+        cnt = atomic_load_explicit(pending_cntr, memory_order_relaxed); // this could be updated by another thread
     } while (cnt < cur_cnt || prev_cnt < cnt || cur_cnt != old_cnt);
     assert(prev_cnt <= cnt);
     return 0;
@@ -784,8 +806,10 @@ int rofi_transport_wait_on_context_comp(rofi_transport_t *rofi, void *context) {
 
 int rofi_transport_put_inject(rofi_transport_t *rofi, struct fi_rma_iov *rma_iov, fi_addr_t pe, const void *src_addr, size_t len) {
     pthread_mutex_lock(&rofi->lock);
-    
-    rofi->pending_put_cntr = MAX(rofi->pending_put_cntr+1, fi_cntr_read(rofi->put_cntr) + 1);
+
+    // atomic_max_with_inc(&rofi->pending_put_cntr, fi_cntr_read(rofi->put_cntr) + 1);
+    atomic_max_with_inc(&rofi->pending_put_cntr, fi_cntr_read(rofi->put_cntr));
+
     DEBUG_MSG("fi_inject_write %p %p %d %d %p 0x%lx", rofi->ep, src_addr, len, pe, rma_iov->addr, rma_iov->key);
     int ret = fi_inject_write(rofi->ep, src_addr, len, pe, rma_iov->addr, rma_iov->key);
     while (ret) { // retry while FI_EAGAIN
@@ -795,8 +819,9 @@ int rofi_transport_put_inject(rofi_transport_t *rofi, struct fi_rma_iov *rma_iov
         }
         ret = fi_inject_write(rofi->ep, src_addr, len, pe, rma_iov->addr, rma_iov->key);
     }
+    atomic_fetch_add_explicit(&rofi->pending_put_cntr, 1, memory_order_relaxed); // ensure visibility
     pthread_mutex_unlock(&rofi->lock);
-    DEBUG_MSG("fi_inject_write done %p %p %d %d %p 0x%lx", rofi->ep, src_addr, len, pe, rma_iov->addr, rma_iov->key);
+    // atomic_max_u64(&rofi->pending_put_cntr, fi_cntr_read(rofi->put_cntr));
     return 0;
 }
 
@@ -807,26 +832,28 @@ int rofi_transport_put_large(rofi_transport_t *rofi, struct fi_rma_iov *rma_iov,
     uint64_t dst_cur_addr = (uint64_t)rma_iov->addr;
     pthread_mutex_lock(&rofi->lock);
     
-    rofi->pending_put_cntr = MAX(rofi->pending_put_cntr, fi_cntr_read(rofi->put_cntr));
-    DEBUG_MSG("fi_write %p %p %d %d %p 0x%lx", rofi->ep, src_cur_addr, len, pe, rma_iov->addr, rma_iov->key);
+    atomic_max_u64(&rofi->pending_put_cntr, fi_cntr_read(rofi->put_cntr));
+    DEBUG_MSG("fi_write %p %p %lu %d %p 0x%lx", rofi->ep, src_cur_addr, (unsigned long)len, pe, rma_iov->addr, rma_iov->key);
     while (src_cur_addr < src_end_addr) {
         uint64_t cur_len = MIN(src_end_addr - src_cur_addr, rofi->desc.max_message_size);
-        rofi->pending_put_cntr += 1;
+        
 
         int ret = fi_write(rofi->ep, src_cur_addr, cur_len, desc, pe, dst_cur_addr, rma_iov->key, context);
 
         while (ret) { // retry while FI_EAGAIN
             ret = rofi_transport_check_rma_err(rofi, ret);
             if (ret) {
+                pthread_mutex_unlock(&rofi->lock);
                 return ret;
             }
             ret = fi_write(rofi->ep, src_cur_addr, cur_len, desc, pe, dst_cur_addr, rma_iov->key, context);
         }
+        atomic_fetch_add_explicit(&rofi->pending_put_cntr, 1, memory_order_relaxed);
         src_cur_addr += cur_len;
         dst_cur_addr += cur_len;
     }
     pthread_mutex_unlock(&rofi->lock);
-    DEBUG_MSG("fi_write %p %p %d %d %p 0x%lx", rofi->ep, src_addr, len, pe, rma_iov->addr, rma_iov->key);
+    DEBUG_MSG("fi_write %p %p %lu %d %p 0x%lx", rofi->ep, src_addr, (unsigned long)len, pe, rma_iov->addr, rma_iov->key);
     return 0;
 }
 
@@ -847,7 +874,7 @@ int rofi_transport_put_wait_all(rofi_transport_t *rofi) {
 int rofi_transport_get_small(rofi_transport_t *rofi, struct fi_rma_iov *rma_iov, uint64_t pe, void *dst_addr, size_t len, void *desc, void *context) {
 
     pthread_mutex_lock(&rofi->lock);
-    rofi->pending_get_cntr = MAX(rofi->pending_get_cntr + 1, fi_cntr_read(rofi->get_cntr) + 1);
+    atomic_max_with_inc(&rofi->pending_get_cntr, fi_cntr_read(rofi->get_cntr) + 1);
     int ret = fi_read(rofi->ep, dst_addr, len, desc, pe, rma_iov->addr, rma_iov->key, context);
     while (ret) { // retry while FI_EAGAIN
         ret = rofi_transport_check_rma_err(rofi, ret);
@@ -866,10 +893,10 @@ int rofi_transport_get_large(rofi_transport_t *rofi, struct fi_rma_iov *rma_iov,
     uint8_t *dst_cur_addr = (uint8_t *)dst_addr;
     uint8_t *dst_end_addr = dst_cur_addr + len;
     pthread_mutex_lock(&rofi->lock);
-    rofi->pending_get_cntr = MAX(rofi->pending_get_cntr , fi_cntr_read(rofi->get_cntr));
+    atomic_max_u64(&rofi->pending_get_cntr, fi_cntr_read(rofi->get_cntr));
     while (dst_cur_addr < dst_end_addr) {
         uint64_t cur_len = MIN(dst_end_addr - dst_cur_addr, rofi->desc.max_message_size);
-        rofi->pending_get_cntr += 1;
+        atomic_fetch_add_explicit(&rofi->pending_get_cntr, 1, memory_order_relaxed);
 
         int ret = fi_read(rofi->ep, dst_cur_addr, cur_len, desc, pe, src_cur_addr, rma_iov->key, context);
 
@@ -903,7 +930,7 @@ int rofi_transport_get_wait_all(rofi_transport_t *rofi) {
 int rofi_transport_send(rofi_transport_t *rofi, void *buf, size_t len, uint64_t pe) {
     pthread_mutex_lock(&rofi->lock);
     uint64_t finish_flag = 0;
-    rofi->pending_send_cntr += 1;
+    atomic_fetch_add_explicit(&rofi->pending_send_cntr, 1, memory_order_relaxed);
     int ret = fi_send(rofi->ep, buf, len, NULL, rofi->remote_addrs[pe], &finish_flag);
     while (ret) { // retry while FI_EAGAIN
         ret = rofi_transport_check_rma_err(rofi, ret);
@@ -923,7 +950,7 @@ int rofi_transport_send(rofi_transport_t *rofi, void *buf, size_t len, uint64_t 
 int rofi_transport_recv(rofi_transport_t *rofi, void *buf, size_t len) {
     pthread_mutex_lock(&rofi->lock);
     uint64_t finish_flag = 0;
-    rofi->pending_recv_cntr += 1;
+    atomic_fetch_add_explicit(&rofi->pending_recv_cntr, 1, memory_order_relaxed);
     int ret = fi_recv(rofi->ep, buf, len, NULL, 0, &finish_flag);
     while (ret) { // retry while FI_EAGAIN
         ret = rofi_transport_check_rma_err(rofi, ret);
