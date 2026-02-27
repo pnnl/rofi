@@ -1,15 +1,3 @@
 [submodule "uthash"]
 	path = uthash
 	url = https://github.com/troydhanson/uthash.git
-[submodule "openpmix-src/openpmix"]
-	path = openpmix-src/openpmix
-	url = https://github.com/openpmix/openpmix.git
-[submodule "prrte-src/prrte"]
-	path = prrte-src/prrte
-	url = https://github.com/openpmix/prrte.git
-[submodule "libfabric-src/libfabric"]
-	path = libfabric-src/libfabric
-	url = https://github.com/ofiwg/libfabric.git
-[submodule "pmi-mpich-src/mpich"]
-	path = pmi-mpich-src/mpich
-	url = https://github.com/pmodels/mpich.git
