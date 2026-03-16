@@ -6,19 +6,24 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# pmix-sys = {path = "../pmix-sys/", optional = true, default-features = false}
-# pmi2-sys = {path = "../pmi2-sys/", optional = true, default-features = false}
-libfabric = {git="https://github.com/pnnl/rofi.git", branch = "libfabric-async", features = ["use-async-std"]}
-pmi = {path = "/people/thom895/rofi/pmi/"}
-page_size= "0.6.0" 
+libfabric = { git = "https://github.com/pnnl/lamellar.git", features = [
+    "use-async-std",
+    "threading-completion",
+] }
+pmi = { git = "https://github.com/pnnl/lamellar.git" }
+page_size = "0.6.0"
 memmap = "0.7.0"
 debug_print = "1.0.0"
 parking_lot = "0.12.3"
-async-std = {version = "1.12.0", optional = true}
+async-std = { version = "1.12.0", optional = true }
 # async-io = {version = "2.3.2", optional = true}
-tokio = {version = "1.38", optional = true}
+tokio = { version = "1.38", optional = true }
 futures = "*"
 [features]
 # async-ofi = ["libfabric/use-async-std"]
 async-rofi = ["libfabric/use-async-std", "async-std"]
 async-rofi-tokio = ["libfabric/use-tokio", "tokio"]
+with-pmi1 = ["pmi/with-pmi1"]
+with-pmi2 = ["pmi/with-pmi2"]
+with-pmix = ["pmi/with-pmix"]
+pmi-vendored = ["pmi/vendored"]
