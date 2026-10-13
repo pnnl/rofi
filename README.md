@@ -1,3 +1,11 @@
+> [!IMPORTANT]
+> **This repository is archived and no longer maintained here.**
+> ROFI now lives in the [`pnnl/lamellar`](https://github.com/pnnl/lamellar) monorepo at
+> [`communication_frameworks/rofi`](https://github.com/pnnl/lamellar/tree/master/communication_frameworks/rofi).
+> Please open issues and pull requests there. The full commit history, including the
+> `v0.2` and `v0.3` tags (as `rofi/v0.2` and `rofi/v0.3`), was carried over; commit
+> SHAs differ from this repository.
+
 Rust OpenFabrics Interface Transport Layer (ROFI)
 =================================================
 
